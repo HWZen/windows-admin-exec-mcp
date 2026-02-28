@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy this file to config.json in the same directory as AdminExecMCP.exe",
+  "port": 12380,
+  "bind_address": "127.0.0.1",
+  "max_connections": 16,
+  "approval": {
+    "enabled": false,
+    "type": "telegram",
+    "telegram": {
+      "bot_token": "YOUR_BOT_TOKEN_HERE",
+      "chat_id": "YOUR_CHAT_ID_HERE",
+      "timeout_seconds": 300,
+      "poll_interval_ms": 2000
+    }
+  }
+}
