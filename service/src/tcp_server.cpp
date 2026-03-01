@@ -75,7 +75,9 @@ bool parse_request(const std::string& raw, CommandRequest& req) {
     }
 }
 
-// Serialize CommandResponse to JSON
+// Serialize CommandResponse to JSON.
+// Uses error_handler_t::replace so residual non-UTF-8 bytes (if any) are
+// replaced with U+FFFD rather than throwing an exception.
 std::string serialize_response(const CommandResponse& resp) {
     json j;
     j["id"]            = resp.id;
@@ -84,7 +86,7 @@ std::string serialize_response(const CommandResponse& resp) {
     j["stderr_output"] = resp.stderr_output;
     j["exit_code"]     = resp.exit_code;
     j["error_message"] = resp.error_message;
-    return j.dump();
+    return j.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 // Handle a single client connection in its own thread.
@@ -113,20 +115,33 @@ void handle_client(SOCKET client_sock, const ServiceConfig& cfg) {
 
     resp.id = req.id;
 
-    // Approval gate (optional)
-    if (cfg.approval.enabled && cfg.approval.type == "telegram") {
-        std::string reason;
-        if (!request_approval(cfg.approval.telegram, req, reason)) {
-            resp.success       = false;
-            resp.error_message = "Approval denied: " + reason;
-            send_message(client_sock, serialize_response(resp));
-            closesocket(client_sock);
-            return;
+    // Everything from here is in the context of this client's request.
+    // Catch any exception, report it back to the caller instead of crashing.
+    try {
+        // Approval gate (optional)
+        if (cfg.approval.enabled && cfg.approval.type == "telegram") {
+            std::string reason;
+            if (!request_approval(cfg.approval.telegram, req, reason)) {
+                resp.success       = false;
+                resp.error_message = "Approval denied: " + reason;
+                send_message(client_sock, serialize_response(resp));
+                closesocket(client_sock);
+                return;
+            }
         }
+
+        execute_command(req, resp);
+        send_message(client_sock, serialize_response(resp));
+    } catch (const std::exception& e) {
+        resp.success = false;
+        resp.error_message = std::string("Internal server error: ") + e.what();
+        send_message(client_sock, serialize_response(resp));
+    } catch (...) {
+        resp.success = false;
+        resp.error_message = "Internal server error: unknown exception";
+        send_message(client_sock, serialize_response(resp));
     }
 
-    execute_command(req, resp);
-    send_message(client_sock, serialize_response(resp));
     closesocket(client_sock);
 }
 

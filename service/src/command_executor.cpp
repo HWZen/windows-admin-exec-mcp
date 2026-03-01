@@ -21,7 +21,7 @@ std::string drain_pipe(HANDLE h) {
     return result;
 }
 
-// Convert a narrow string to a wide string.
+// Convert a narrow string to a wide string (UTF-8 source).
 std::wstring to_wide(const std::string& s) {
     if (s.empty()) return {};
     int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
@@ -37,6 +37,54 @@ std::string to_utf8(const std::wstring& ws) {
     std::string s(len, '\0');
     WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), s.data(), len, nullptr, nullptr);
     return s;
+}
+
+// Return true when every byte in `s` forms a valid UTF-8 sequence.
+// Uses MultiByteToWideChar with MB_ERR_INVALID_CHARS: any invalid byte
+// causes the call to fail and return 0, so `r > 0` means "all bytes are
+// valid UTF-8".  Empty strings are considered valid.
+bool is_valid_utf8(const std::string& s) {
+    if (s.empty()) return true;
+    int r = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                s.data(), static_cast<int>(s.size()),
+                                nullptr, 0);
+    return r > 0;
+}
+
+// Convert a GBK (codepage 936) encoded string to UTF-8.
+// If the bytes cannot be decoded as GBK (which should be rare), non-ASCII
+// bytes are replaced with '?' to guarantee the returned string is always
+// valid UTF-8.
+std::string gbk_to_utf8(const std::string& s) {
+    if (s.empty()) return {};
+    // GBK → UTF-16
+    int wlen = MultiByteToWideChar(936, 0,
+                                   s.data(), static_cast<int>(s.size()),
+                                   nullptr, 0);
+    if (wlen > 0) {
+        std::wstring ws(wlen, L'\0');
+        MultiByteToWideChar(936, 0, s.data(), static_cast<int>(s.size()), ws.data(), wlen);
+        // UTF-16 → UTF-8
+        return to_utf8(ws);
+    }
+    // Fallback: bytes are neither valid UTF-8 nor valid GBK.
+    // Replace every non-ASCII byte with '?' so the result is valid UTF-8.
+    std::string result;
+    result.reserve(s.size());
+    for (unsigned char c : s) {
+        result += (c < 0x80) ? static_cast<char>(c) : '?';
+    }
+    return result;
+}
+
+// Guarantee the returned string is valid UTF-8.
+// Only UTF-8 and GBK (codepage 936) are considered as input encodings.
+// If the input is not valid UTF-8 it is assumed to be GBK and converted
+// accordingly.  This matches the requirement that only these two encodings
+// need to be supported.
+std::string ensure_utf8(const std::string& s) {
+    if (is_valid_utf8(s)) return s;
+    return gbk_to_utf8(s);
 }
 
 } // anonymous namespace
@@ -118,8 +166,8 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
         WaitForSingleObject(pi.hProcess, 5000);
     }
 
-    resp.stdout_output = drain_pipe(stdout_read);
-    resp.stderr_output = drain_pipe(stderr_read);
+    resp.stdout_output = ensure_utf8(drain_pipe(stdout_read));
+    resp.stderr_output = ensure_utf8(drain_pipe(stderr_read));
 
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
