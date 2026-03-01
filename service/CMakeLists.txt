@@ -35,6 +35,12 @@ if(NOT WIN32)
     message(FATAL_ERROR "AdminExecMCP only supports Windows.")
 endif()
 
+target_compile_options(AdminExecMCP PRIVATE
+    /W4 # Enable high warning level
+    /WX # Treat warnings as errors
+    /utf-8 # Use UTF-8 encoding
+)
+
 target_compile_definitions(AdminExecMCP PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
