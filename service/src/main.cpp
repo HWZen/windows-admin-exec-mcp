@@ -40,6 +40,9 @@ void print_usage(const wchar_t* prog) {
 } // anonymous namespace
 
 int wmain(int argc, wchar_t* argv[]) {
+
+    std::wcout.imbue(std::locale("chs.UTF-8"));
+
     ServiceConfig cfg = load_config(find_config_path());
 
     if (argc < 2) {
@@ -87,6 +90,7 @@ int wmain(int argc, wchar_t* argv[]) {
                    << std::wstring(cfg.bind_address.begin(), cfg.bind_address.end())
                    << L":" << cfg.port << L"\n"
                    << L"Press Ctrl+C to stop.\n";
+        std::wcout.flush();
         TcpServer server(cfg);
         server.run();
         return 0;
