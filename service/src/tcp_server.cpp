@@ -17,6 +17,7 @@
 #include <vector>
 #include <stdexcept>
 #include <cstring>
+#include <cstddef>
 
 using json = nlohmann::json;
 
@@ -75,9 +76,18 @@ bool parse_request(const std::string& raw, CommandRequest& req) {
     }
 }
 
+// Maximum response size — mirrors the 16 MB inbound limit so the Python
+// client can always receive the framed message.
+static constexpr size_t kMaxResponseBytes = 16ULL * 1024 * 1024;
+// Reserve 1 MB inside the limit for JSON overhead and the error message.
+static constexpr size_t kOutputBudget = kMaxResponseBytes - 1024 * 1024;
+
 // Serialize CommandResponse to JSON.
 // Uses error_handler_t::replace so residual non-UTF-8 bytes (if any) are
 // replaced with U+FFFD rather than throwing an exception.
+// If the serialized size would exceed 16 MB, stdout and stderr are truncated
+// proportionally (each by its share of the total output size) and an
+// informational error_message is included.
 std::string serialize_response(const CommandResponse& resp) {
     json j;
     j["id"]            = resp.id;
@@ -86,6 +96,33 @@ std::string serialize_response(const CommandResponse& resp) {
     j["stderr_output"] = resp.stderr_output;
     j["exit_code"]     = resp.exit_code;
     j["error_message"] = resp.error_message;
+
+    std::string result = j.dump(-1, ' ', false, json::error_handler_t::replace);
+
+    if (result.size() <= kMaxResponseBytes) {
+        return result;
+    }
+
+    // Output too large — truncate stdout / stderr proportionally.
+    size_t out_len = resp.stdout_output.size() + resp.stderr_output.size();
+    if (out_len > 0) {
+        // Apply a 10% extra margin so the re-serialized result stays under
+        // the limit even after adding the truncation warning message.
+        double factor = static_cast<double>(kOutputBudget) / static_cast<double>(out_len) * 0.9;
+        if (factor > 1.0) factor = 1.0;
+
+        size_t keep_stdout = static_cast<size_t>(resp.stdout_output.size() * factor);
+        size_t keep_stderr = static_cast<size_t>(resp.stderr_output.size() * factor);
+
+        j["stdout_output"] = resp.stdout_output.substr(0, keep_stdout);
+        j["stderr_output"] = resp.stderr_output.substr(0, keep_stderr);
+    }
+
+    std::string trunc_msg = "[Output truncated: response exceeded 16 MB limit]";
+    j["error_message"] = resp.error_message.empty()
+        ? trunc_msg
+        : resp.error_message + " | " + trunc_msg;
+
     return j.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
@@ -178,7 +215,11 @@ void TcpServer::run() {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port   = htons(cfg_.port);
-    inet_pton(AF_INET, cfg_.bind_address.c_str(), &addr.sin_addr);
+    int pton_result = inet_pton(AF_INET, cfg_.bind_address.c_str(), &addr.sin_addr);
+    if (pton_result != 1) {
+        closesocket(listen_sock);
+        throw std::runtime_error("invalid bind address: " + cfg_.bind_address);
+    }
 
     if (bind(listen_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
         closesocket(listen_sock);
@@ -203,7 +244,8 @@ void TcpServer::run() {
         SOCKET client = accept(listen_sock, nullptr, nullptr);
         if (client == INVALID_SOCKET) continue;
 
-        // Spawn a detached thread per connection
+        // Spawn a detached thread per connection.
+        // TODO: limit concurrent threads to avoid resource exhaustion under heavy load.
         std::thread([client, this]() {
             handle_client(client, cfg_);
         }).detach();

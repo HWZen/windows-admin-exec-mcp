@@ -83,8 +83,9 @@ cmake --build build --config Release
 ### 2. Install the Service
 
 ```bat
-cd service\build\Release
-copy ..\..\..\config.example.json config.json
+cd service
+copy build\Release\AdminExecMCP.exe .
+copy config.example.json config.json
 REM Edit config.json if you want Telegram approval
 install.bat
 ```

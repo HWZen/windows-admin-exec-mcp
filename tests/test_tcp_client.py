@@ -30,6 +30,17 @@ def _frame(data: dict) -> bytes:
     return struct.pack(">I", len(payload)) + payload
 
 
+def _recv_exactly(conn: socket.socket, n: int) -> bytes:
+    """Read exactly `n` bytes from `conn`, looping as needed."""
+    data = b""
+    while len(data) < n:
+        chunk = conn.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("connection closed before all bytes received")
+        data += chunk
+    return data
+
+
 def _start_mock_server(response: dict) -> tuple[int, threading.Thread]:
     """Start a one-shot mock TCP server that returns `response` to the first client."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -42,10 +53,11 @@ def _start_mock_server(response: dict) -> tuple[int, threading.Thread]:
     def serve():
         ready.set()  # signal that accept() is ready
         conn, _ = server.accept()
-        # Read the request (length-prefixed)
-        raw_len = conn.recv(4)
+        # Read the request (length-prefixed) — use _recv_exactly to avoid
+        # partial reads that would cause struct.unpack / json.loads to fail.
+        raw_len = _recv_exactly(conn, 4)
         (length,) = struct.unpack(">I", raw_len)
-        conn.recv(length)  # discard request body
+        _recv_exactly(conn, length)  # discard request body
         # Send the mock response
         conn.sendall(_frame(response))
         conn.close()
@@ -108,9 +120,9 @@ class TestSendCommand:
 
         def serve(server):
             conn, _ = server.accept()
-            raw_len = conn.recv(4)
+            raw_len = _recv_exactly(conn, 4)
             (length,) = struct.unpack(">I", raw_len)
-            body = conn.recv(length)
+            body = _recv_exactly(conn, length)
             received_request.append(json.loads(body))
             mock = {
                 "id": "x", "success": True,

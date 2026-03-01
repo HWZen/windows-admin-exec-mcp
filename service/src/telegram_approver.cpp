@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <mutex>
 #include <sstream>
 #include <thread>
 #include <string>
@@ -62,7 +63,54 @@ std::string http_post_json(const std::string& url, const std::string& body) {
     return response;
 }
 
-// Send a Telegram message. Returns true on success.
+// Escape HTML entities in a string so it is safe to embed in parse_mode=HTML.
+std::string html_escape(const std::string& s) {
+    std::string result;
+    result.reserve(s.size());
+    for (unsigned char c : s) {
+        switch (c) {
+            case '&':  result += "&amp;";  break;
+            case '<':  result += "&lt;";   break;
+            case '>':  result += "&gt;";   break;
+            case '"':  result += "&quot;"; break;
+            case '\'': result += "&#39;";  break;
+            default:   result += static_cast<char>(c);
+        }
+    }
+    return result;
+}
+
+// Send a Telegram message with an inline keyboard containing Approve/Deny
+// buttons.  Returns the message_id on success, or -1 on failure.
+int send_approval_message(const std::string& token,
+                          const std::string& chat_id,
+                          const std::string& text,
+                          const std::string& approve_data,
+                          const std::string& deny_data) {
+    std::string url = "https://api.telegram.org/bot" + token + "/sendMessage";
+    json body;
+    body["chat_id"]    = chat_id;
+    body["text"]       = text;
+    body["parse_mode"] = "HTML";
+    body["reply_markup"]["inline_keyboard"] = json::array({
+        json::array({
+            json::object({{"text", "✅ Approve"}, {"callback_data", approve_data}}),
+            json::object({{"text", "❌ Deny"},    {"callback_data", deny_data}})
+        })
+    });
+
+    std::string resp = http_post_json(url, body.dump());
+    if (resp.empty()) return -1;
+    try {
+        auto j = json::parse(resp);
+        if (!j.value("ok", false)) return -1;
+        return j["result"].value("message_id", -1);
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Send a plain Telegram message (no keyboard). Returns true on success.
 bool send_telegram_message(const std::string& token,
                            const std::string& chat_id,
                            const std::string& text) {
@@ -81,6 +129,14 @@ bool send_telegram_message(const std::string& token,
     }
 }
 
+// Acknowledge a callback query so Telegram removes the "loading" indicator.
+void answer_callback_query(const std::string& token, const std::string& cq_id) {
+    std::string url = "https://api.telegram.org/bot" + token + "/answerCallbackQuery";
+    json body;
+    body["callback_query_id"] = cq_id;
+    http_post_json(url, body.dump());
+}
+
 // Poll for updates with offset, return new updates.
 json get_updates(const std::string& token, long long offset) {
     std::ostringstream url;
@@ -95,61 +151,91 @@ json get_updates(const std::string& token, long long offset) {
     }
 }
 
+// Global offset persisted across approval requests so each new request starts
+// polling from where the previous one left off (avoids re-scanning the backlog).
+std::mutex g_offset_mutex;
+long long  g_offset = 0;
+
 } // anonymous namespace
 
 bool request_approval(const TelegramConfig& cfg,
                       const CommandRequest& req,
                       std::string& reason) {
-    // Compose notification message (HTML parse mode)
+    // Unique callback_data tokens for this request's buttons.
+    const std::string approve_data = "approve_" + req.id;
+    const std::string deny_data    = "deny_"    + req.id;
+
+    // Compose notification message (HTML parse mode).
+    // User-controlled fields (command, working_dir) are HTML-escaped to
+    // prevent markup injection.
     std::ostringstream msg;
     msg << "🔐 <b>AdminExecMCP — Approval Required</b>\n\n"
-        << "Command:\n<pre>" << req.command << "</pre>\n";
+        << "Command:\n<pre>" << html_escape(req.command) << "</pre>\n";
     if (!req.working_dir.empty()) {
-        msg << "Working dir: <code>" << req.working_dir << "</code>\n";
+        msg << "Working dir: <code>" << html_escape(req.working_dir) << "</code>\n";
     }
     msg << "Timeout: " << req.timeout_seconds << "s\n"
         << "Request ID: <code>" << req.id << "</code>\n\n"
-        << "Reply:\n"
-        << "  /approve_" << req.id << "  — to approve\n"
-        << "  /deny_"    << req.id << "  — to deny";
+        << "Use the buttons below to approve or deny.";
 
-    if (!send_telegram_message(cfg.bot_token, cfg.chat_id, msg.str())) {
+    if (send_approval_message(cfg.bot_token, cfg.chat_id, msg.str(),
+                              approve_data, deny_data) < 0) {
         reason = "Failed to send Telegram notification";
         return false;
     }
 
-    // Poll for /approve_<id> or /deny_<id>
-    long long offset = 0;
+    // Retrieve the persisted offset so we only process new updates.
+    long long offset;
+    {
+        std::lock_guard<std::mutex> lk(g_offset_mutex);
+        offset = g_offset;
+    }
+
     auto deadline = std::chrono::steady_clock::now()
                     + std::chrono::seconds(cfg.timeout_seconds);
-
-    std::string approve_cmd = "/approve_" + req.id;
-    std::string deny_cmd    = "/deny_"    + req.id;
 
     while (std::chrono::steady_clock::now() < deadline) {
         json updates = get_updates(cfg.bot_token, offset);
         if (updates.contains("result") && updates["result"].is_array()) {
             for (auto& upd : updates["result"]) {
                 long long upd_id = upd.value("update_id", 0LL);
-                if (upd_id >= offset) offset = upd_id + 1;
-
-                std::string text;
-                if (upd.contains("message") &&
-                    upd["message"].contains("text") &&
-                    upd["message"]["text"].is_string()) {
-                    text = upd["message"]["text"].get<std::string>();
+                if (upd_id >= offset) {
+                    long long new_off = upd_id + 1;
+                    // Persist the advanced offset.
+                    {
+                        std::lock_guard<std::mutex> lk(g_offset_mutex);
+                        if (new_off > g_offset) g_offset = new_off;
+                    }
+                    offset = new_off;
                 }
 
-                if (text == approve_cmd) {
-                    send_telegram_message(cfg.bot_token, cfg.chat_id,
-                        "✅ Approved: <code>" + req.id + "</code>");
-                    return true;
-                }
-                if (text == deny_cmd) {
-                    send_telegram_message(cfg.bot_token, cfg.chat_id,
-                        "❌ Denied: <code>" + req.id + "</code>");
-                    reason = "Request denied via Telegram";
-                    return false;
+                // Handle inline-keyboard callback queries.
+                if (upd.contains("callback_query")) {
+                    auto& cq = upd["callback_query"];
+
+                    // Validate that the response comes from the configured chat.
+                    long long from_chat = 0;
+                    if (cq.contains("message") && cq["message"].contains("chat")) {
+                        from_chat = cq["message"]["chat"].value("id", 0LL);
+                    }
+                    if (std::to_string(from_chat) != cfg.chat_id) continue;
+
+                    std::string cq_id   = cq.value("id", "");
+                    std::string cb_data = cq.value("data", "");
+
+                    if (cb_data == approve_data) {
+                        answer_callback_query(cfg.bot_token, cq_id);
+                        send_telegram_message(cfg.bot_token, cfg.chat_id,
+                            "✅ Approved: <code>" + req.id + "</code>");
+                        return true;
+                    }
+                    if (cb_data == deny_data) {
+                        answer_callback_query(cfg.bot_token, cq_id);
+                        send_telegram_message(cfg.bot_token, cfg.chat_id,
+                            "❌ Denied: <code>" + req.id + "</code>");
+                        reason = "Request denied via Telegram";
+                        return false;
+                    }
                 }
             }
         }

@@ -10,7 +10,7 @@
 struct CommandRequest {
     std::string id;               // Unique request UUID
     std::string command;          // Command line to execute (passed to cmd.exe /c)
-    std::string working_dir;      // Working directory (empty = %SystemRoot%\System32)
+    std::string working_dir;      // Working directory (empty = inherit service process working directory)
     uint32_t timeout_seconds = 60; // Execution timeout
 };
 

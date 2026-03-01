@@ -7,18 +7,22 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <chrono>
 
 namespace {
 
-// Read all data available from a non-blocking anonymous pipe handle.
-std::string drain_pipe(HANDLE h) {
-    std::string result;
-    std::array<char, 4096> buf{};
-    DWORD read = 0;
-    while (ReadFile(h, buf.data(), static_cast<DWORD>(buf.size()), &read, nullptr) && read > 0) {
-        result.append(buf.data(), read);
+// Drain all bytes currently available in a named pipe, appending to `out`.
+// Uses PeekNamedPipe so it never blocks when the pipe is empty.
+void peek_and_read(HANDLE h, std::string& out) {
+    DWORD avail = 0;
+    while (PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
+        std::array<char, 4096> buf{};
+        DWORD to_read = avail < static_cast<DWORD>(buf.size())
+                        ? avail : static_cast<DWORD>(buf.size());
+        DWORD read = 0;
+        if (!ReadFile(h, buf.data(), to_read, &read, nullptr) || read == 0) break;
+        out.append(buf.data(), read);
     }
-    return result;
 }
 
 // Convert a narrow string to a wide string (UTF-8 source).
@@ -119,11 +123,31 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
     SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
 
+    // Open the NUL device as an inheritable, read-only handle for the child's
+    // stdin.  Using NUL ensures the child has a valid stdin fd but receives
+    // immediate EOF on any read attempt — no input is forwarded from the
+    // service process.
+    HANDLE nul_handle = CreateFileW(
+        L"NUL",
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &sa,           // bInheritHandle = TRUE
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+    if (nul_handle == INVALID_HANDLE_VALUE) {
+        CloseHandle(stdout_read);
+        CloseHandle(stderr_read);
+        resp.error_message = "Failed to open NUL device for child stdin";
+        return;
+    }
+
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.hStdOutput = stdout_write;
     si.hStdError  = stderr_write;
-    si.hStdInput  = INVALID_HANDLE_VALUE;
+    si.hStdInput  = nul_handle;
     si.dwFlags    = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
 
@@ -142,9 +166,11 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
         &pi
     );
 
-    // Close the write ends in the parent immediately after spawning
+    // Close the write ends in the parent immediately after spawning.
+    // Also close the NUL handle — the child already inherited its own copy.
     CloseHandle(stdout_write);
     CloseHandle(stderr_write);
+    if (nul_handle != INVALID_HANDLE_VALUE) CloseHandle(nul_handle);
 
     if (!created) {
         CloseHandle(stdout_read);
@@ -154,20 +180,43 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
         return;
     }
 
-    // Wait for the process to finish (or timeout)
-    DWORD timeout_ms = (req.timeout_seconds == 0)
-        ? INFINITE
+    // Wait for the process to finish, draining stdout/stderr in 1-second
+    // slices to avoid pipe buffer deadlocks.  The child may block on a full
+    // pipe write if the parent doesn't read; polling with PeekNamedPipe
+    // prevents that while still respecting the overall timeout.
+    const bool infinite_wait = (req.timeout_seconds == 0);
+    const DWORD timeout_ms   = infinite_wait
+        ? 0u
         : static_cast<DWORD>(req.timeout_seconds) * 1000u;
 
-    DWORD wait_result = WaitForSingleObject(pi.hProcess, timeout_ms);
+    auto start_time = std::chrono::steady_clock::now();
+    bool timed_out  = false;
 
-    if (wait_result == WAIT_TIMEOUT) {
-        TerminateProcess(pi.hProcess, 1);
-        WaitForSingleObject(pi.hProcess, 5000);
+    while (true) {
+        DWORD slice = WaitForSingleObject(pi.hProcess, 1000); // 1-second poll slice
+        // Drain whatever output became available during this slice.
+        peek_and_read(stdout_read, resp.stdout_output);
+        peek_and_read(stderr_read, resp.stderr_output);
+
+        if (slice == WAIT_OBJECT_0) {
+            break; // Process finished
+        }
+
+        // WAIT_TIMEOUT: check against the total configured timeout.
+        if (!infinite_wait) {
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            if (static_cast<DWORD>(elapsed_ms) >= timeout_ms) {
+                TerminateProcess(pi.hProcess, 1);
+                WaitForSingleObject(pi.hProcess, 5000);
+                // Final drain after forced termination.
+                peek_and_read(stdout_read, resp.stdout_output);
+                peek_and_read(stderr_read, resp.stderr_output);
+                timed_out = true;
+                break;
+            }
+        }
     }
-
-    resp.stdout_output = ensure_utf8(drain_pipe(stdout_read));
-    resp.stderr_output = ensure_utf8(drain_pipe(stderr_read));
 
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
@@ -178,7 +227,11 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
-    if (wait_result == WAIT_TIMEOUT) {
+    // Convert accumulated pipe output to UTF-8 (GBK if not already valid UTF-8).
+    resp.stdout_output = ensure_utf8(resp.stdout_output);
+    resp.stderr_output = ensure_utf8(resp.stderr_output);
+
+    if (timed_out) {
         resp.error_message = "Command timed out after " + std::to_string(req.timeout_seconds) + " seconds";
         resp.success = false;
     } else {

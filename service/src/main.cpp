@@ -41,7 +41,11 @@ void print_usage(const wchar_t* prog) {
 
 int wmain(int argc, wchar_t* argv[]) {
 
-    std::wcout.imbue(std::locale("chs.UTF-8"));
+    try {
+        std::wcout.imbue(std::locale("chs.UTF-8"));
+    } catch (...) {
+        // Locale not available on this system — continue with the default locale.
+    }
 
     ServiceConfig cfg = load_config(find_config_path());
 
