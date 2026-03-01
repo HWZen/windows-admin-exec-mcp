@@ -1,0 +1,50 @@
+# C++ build artifacts
+build/
+out/
+*.exe
+*.lib
+*.dll
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.iobj
+*.ipdb
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+
+# vcpkg
+vcpkg_installed/
+.vcpkg-root
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+.eggs/
+.pytest_cache/
+
+# IDE
+.vscode/
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.vcxproj.user
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
