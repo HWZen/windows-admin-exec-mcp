@@ -35,7 +35,7 @@ std::string http_get(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     if (!proxy.empty()) {
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
     }
@@ -71,7 +71,7 @@ std::string http_post_json(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     if (!proxy.empty()) {
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
     }
