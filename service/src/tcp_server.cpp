@@ -14,7 +14,6 @@
 
 #include <thread>
 #include <string>
-#include <vector>
 #include <stdexcept>
 #include <cstring>
 #include <cstddef>
@@ -26,6 +25,7 @@ using json = nlohmann::json;
 // ---------------------------------------------------------------------------
 
 namespace {
+
 
 bool send_all(SOCKET s, const char* buf, int len) {
     int sent = 0;
@@ -127,7 +127,7 @@ std::string serialize_response(const CommandResponse& resp) {
 }
 
 // Handle a single client connection in its own thread.
-void handle_client(SOCKET client_sock, const ServiceConfig& cfg) {
+void handle_client(SOCKET client_sock, const ServiceConfig& cfg, TelegramApprover* approver) {
     // Set a receive timeout so a stalled client won't hold a thread forever
     DWORD timeout_ms = 30 * 1000; // 30 seconds for receiving a request
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO,
@@ -158,7 +158,7 @@ void handle_client(SOCKET client_sock, const ServiceConfig& cfg) {
         // Approval gate (optional)
         if (cfg.approval.enabled && cfg.approval.type == "telegram") {
             std::string reason;
-            if (!request_approval(cfg.approval.telegram, req, reason)) {
+            if (approver && !approver->request_approval(cfg.approval.telegram, req, reason)) {
                 resp.success       = false;
                 resp.error_message = "Approval denied: " + reason;
                 send_message(client_sock, serialize_response(resp));
@@ -232,6 +232,10 @@ void TcpServer::run() {
     }
 
     // Set a select timeout so stop() takes effect promptly
+    TelegramApprover *approver = nullptr;
+    if (cfg_.approval.enabled && cfg_.approval.type == "telegram") {
+        approver = new TelegramApprover();
+    }
     while (running_) {
         fd_set rfds;
         FD_ZERO(&rfds);
@@ -246,10 +250,11 @@ void TcpServer::run() {
 
         // Spawn a detached thread per connection.
         // TODO: limit concurrent threads to avoid resource exhaustion under heavy load.
-        std::thread([client, this]() {
-            handle_client(client, cfg_);
+        std::thread([client, this, approver]() {
+            handle_client(client, cfg_, approver);
         }).detach();
     }
+    delete approver;
 
     closesocket(listen_sock);
 }

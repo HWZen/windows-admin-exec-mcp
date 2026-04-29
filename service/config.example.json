@@ -9,6 +9,9 @@
     "telegram": {
       "bot_token": "YOUR_BOT_TOKEN_HERE",
       "chat_id": "YOUR_CHAT_ID_HERE",
+      "proxy": "",
+      "proxy_username": "",
+      "proxy_password": "",
       "timeout_seconds": 300,
       "poll_interval_ms": 2000
     }

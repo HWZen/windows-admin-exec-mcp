@@ -8,6 +8,7 @@
 #include <sstream>
 #include <thread>
 #include <string>
+#include <iostream>
 
 using json = nlohmann::json;
 
@@ -22,7 +23,10 @@ size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
 
 // Perform a GET/POST request and return the response body.
 // Returns empty string on error.
-std::string http_get(const std::string& url) {
+std::string http_get(const std::string& url,
+                     const std::string& proxy,
+                     const std::string& proxy_username,
+                     const std::string& proxy_password) {
     CURL* curl = curl_easy_init();
     if (!curl) return {};
 
@@ -32,15 +36,29 @@ std::string http_get(const std::string& url) {
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    if (!proxy.empty()) {
+        curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
+    }
+    if (!proxy_username.empty()) {
+        std::string proxy_userpwd = proxy_username + ":" + proxy_password;
+        curl_easy_setopt(curl, CURLOPT_PROXYUSERPWD, proxy_userpwd.c_str());
+    }
 
     CURLcode res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK) return {};
+    if (res != CURLE_OK) {
+        std::cerr << "HTTP request failed: " << curl_easy_strerror(res) << std::endl;
+        return {};
+    }
     return response;
 }
 
-std::string http_post_json(const std::string& url, const std::string& body) {
+std::string http_post_json(const std::string& url,
+                           const std::string& body,
+                           const std::string& proxy,
+                           const std::string& proxy_username,
+                           const std::string& proxy_password) {
     CURL* curl = curl_easy_init();
     if (!curl) return {};
 
@@ -54,12 +72,22 @@ std::string http_post_json(const std::string& url, const std::string& body) {
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    if (!proxy.empty()) {
+        curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
+    }
+    if (!proxy_username.empty()) {
+        std::string proxy_userpwd = proxy_username + ":" + proxy_password;
+        curl_easy_setopt(curl, CURLOPT_PROXYUSERPWD, proxy_userpwd.c_str());
+    }
 
     CURLcode res = curl_easy_perform(curl);
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK) return {};
+    if (res != CURLE_OK) {
+        std::cerr << "HTTP request failed: " << curl_easy_strerror(res) << std::endl;
+        return {};
+    }
     return response;
 }
 
@@ -86,7 +114,10 @@ int send_approval_message(const std::string& token,
                           const std::string& chat_id,
                           const std::string& text,
                           const std::string& approve_data,
-                          const std::string& deny_data) {
+                          const std::string& deny_data,
+                          const std::string& proxy,
+                          const std::string& proxy_username,
+                          const std::string& proxy_password) {
     std::string url = "https://api.telegram.org/bot" + token + "/sendMessage";
     json body;
     body["chat_id"]    = chat_id;
@@ -99,7 +130,7 @@ int send_approval_message(const std::string& token,
         })
     });
 
-    std::string resp = http_post_json(url, body.dump());
+    std::string resp = http_post_json(url, body.dump(), proxy, proxy_username, proxy_password);
     if (resp.empty()) return -1;
     try {
         auto j = json::parse(resp);
@@ -113,13 +144,16 @@ int send_approval_message(const std::string& token,
 // Send a plain Telegram message (no keyboard). Returns true on success.
 bool send_telegram_message(const std::string& token,
                            const std::string& chat_id,
-                           const std::string& text) {
+                           const std::string& text,
+                           const std::string& proxy,
+                           const std::string& proxy_username,
+                           const std::string& proxy_password) {
     std::string url = "https://api.telegram.org/bot" + token + "/sendMessage";
     json body;
     body["chat_id"]    = chat_id;
     body["text"]       = text;
     body["parse_mode"] = "HTML";
-    std::string resp   = http_post_json(url, body.dump());
+    std::string resp   = http_post_json(url, body.dump(), proxy, proxy_username, proxy_password);
     if (resp.empty()) return false;
     try {
         auto j = json::parse(resp);
@@ -130,19 +164,27 @@ bool send_telegram_message(const std::string& token,
 }
 
 // Acknowledge a callback query so Telegram removes the "loading" indicator.
-void answer_callback_query(const std::string& token, const std::string& cq_id) {
+void answer_callback_query(const std::string& token,
+                           const std::string& cq_id,
+                           const std::string& proxy,
+                           const std::string& proxy_username,
+                           const std::string& proxy_password) {
     std::string url = "https://api.telegram.org/bot" + token + "/answerCallbackQuery";
     json body;
     body["callback_query_id"] = cq_id;
-    http_post_json(url, body.dump());
+    http_post_json(url, body.dump(), proxy, proxy_username, proxy_password);
 }
 
 // Poll for updates with offset, return new updates.
-json get_updates(const std::string& token, long long offset) {
+json get_updates(const std::string& token,
+                 long long offset,
+                 const std::string& proxy,
+                 const std::string& proxy_username,
+                 const std::string& proxy_password) {
     std::ostringstream url;
     url << "https://api.telegram.org/bot" << token
         << "/getUpdates?timeout=5&offset=" << offset;
-    std::string resp = http_get(url.str());
+    std::string resp = http_get(url.str(), proxy, proxy_username, proxy_password);
     if (resp.empty()) return {};
     try {
         return json::parse(resp);
@@ -151,101 +193,109 @@ json get_updates(const std::string& token, long long offset) {
     }
 }
 
-// Global offset persisted across approval requests so each new request starts
-// polling from where the previous one left off (avoids re-scanning the backlog).
-std::mutex g_offset_mutex;
-long long  g_offset = 0;
-
 } // anonymous namespace
 
-bool request_approval(const TelegramConfig& cfg,
-                      const CommandRequest& req,
-                      std::string& reason) {
-    // Unique callback_data tokens for this request's buttons.
-    const std::string approve_data = "approve_" + req.id;
-    const std::string deny_data    = "deny_"    + req.id;
+long long TelegramApprover::get_offset_snapshot() {
+    return offset_;
+}
 
-    // Compose notification message (HTML parse mode).
-    // User-controlled fields (command, working_dir) are HTML-escaped to
-    // prevent markup injection.
-    std::ostringstream msg;
-    msg << "🔐 <b>AdminExecMCP — Approval Required</b>\n\n"
-        << "Command:\n<pre>" << html_escape(req.command) << "</pre>\n";
-    if (!req.working_dir.empty()) {
-        msg << "Working dir: <code>" << html_escape(req.working_dir) << "</code>\n";
+void TelegramApprover::advance_offset_if_needed(long long new_offset) {
+    if (new_offset > offset_) {
+        offset_ = new_offset;
     }
-    msg << "Timeout: " << req.timeout_seconds << "s\n"
-        << "Request ID: <code>" << req.id << "</code>\n\n"
-        << "Use the buttons below to approve or deny.";
+}
 
-    if (send_approval_message(cfg.bot_token, cfg.chat_id, msg.str(),
-                              approve_data, deny_data) < 0) {
-        reason = "Failed to send Telegram notification";
-        return false;
-    }
+bool TelegramApprover::request_approval(const TelegramConfig &cfg,
+                                      const CommandRequest &req,
+                                      std::string &reason) {
+  // Unique callback_data tokens for this request's buttons.
+  const std::string approve_data = "approve_" + req.id;
+  const std::string deny_data = "deny_" + req.id;
 
-    // Retrieve the persisted offset so we only process new updates.
-    long long offset;
-    {
-        std::lock_guard<std::mutex> lk(g_offset_mutex);
-        offset = g_offset;
-    }
+  // Compose notification message (HTML parse mode).
+  // User-controlled fields (command, working_dir) are HTML-escaped to
+  // prevent markup injection.
+  std::ostringstream msg;
+  msg << "🔐 <b>AdminExecMCP — Approval Required</b>\n\n"
+      << "Command:\n<pre>" << html_escape(req.command) << "</pre>\n";
+  if (!req.working_dir.empty()) {
+    msg << "Working dir: <code>" << html_escape(req.working_dir) << "</code>\n";
+  }
+  msg << "Timeout: " << req.timeout_seconds << "s\n"
+      << "Request ID: <code>" << req.id << "</code>\n\n"
+      << "Use the buttons below to approve or deny.";
 
-    auto deadline = std::chrono::steady_clock::now()
-                    + std::chrono::seconds(cfg.timeout_seconds);
+  if (send_approval_message(cfg.bot_token, cfg.chat_id, msg.str(), approve_data,
+                            deny_data, cfg.proxy, cfg.proxy_username,
+                            cfg.proxy_password) < 0) {
+    reason = "Failed to send Telegram notification";
+    return false;
+  }
 
-    while (std::chrono::steady_clock::now() < deadline) {
-        json updates = get_updates(cfg.bot_token, offset);
-        if (updates.contains("result") && updates["result"].is_array()) {
-            for (auto& upd : updates["result"]) {
-                long long upd_id = upd.value("update_id", 0LL);
-                if (upd_id >= offset) {
-                    long long new_off = upd_id + 1;
-                    // Persist the advanced offset.
-                    {
-                        std::lock_guard<std::mutex> lk(g_offset_mutex);
-                        if (new_off > g_offset) g_offset = new_off;
-                    }
-                    offset = new_off;
-                }
+  // Retrieve the persisted offset so we only process new updates.
+  long long offset = get_offset_snapshot();
 
-                // Handle inline-keyboard callback queries.
-                if (upd.contains("callback_query")) {
-                    auto& cq = upd["callback_query"];
+  auto deadline = std::chrono::steady_clock::now() +
+                  std::chrono::seconds(cfg.timeout_seconds);
 
-                    // Validate that the response comes from the configured chat.
-                    long long from_chat = 0;
-                    if (cq.contains("message") && cq["message"].contains("chat")) {
-                        from_chat = cq["message"]["chat"].value("id", 0LL);
-                    }
-                    if (std::to_string(from_chat) != cfg.chat_id) continue;
-
-                    std::string cq_id   = cq.value("id", "");
-                    std::string cb_data = cq.value("data", "");
-
-                    if (cb_data == approve_data) {
-                        answer_callback_query(cfg.bot_token, cq_id);
-                        send_telegram_message(cfg.bot_token, cfg.chat_id,
-                            "✅ Approved: <code>" + req.id + "</code>");
-                        return true;
-                    }
-                    if (cb_data == deny_data) {
-                        answer_callback_query(cfg.bot_token, cq_id);
-                        send_telegram_message(cfg.bot_token, cfg.chat_id,
-                            "❌ Denied: <code>" + req.id + "</code>");
-                        reason = "Request denied via Telegram";
-                        return false;
-                    }
-                }
-            }
+  while (std::chrono::steady_clock::now() < deadline) {
+    json updates = get_updates(cfg.bot_token, offset, cfg.proxy,
+                               cfg.proxy_username, cfg.proxy_password);
+    if (updates.contains("result") && updates["result"].is_array()) {
+      for (auto &upd : updates["result"]) {
+        long long upd_id = upd.value("update_id", 0LL);
+        if (upd_id >= offset) {
+          long long new_off = upd_id + 1;
+          advance_offset_if_needed(new_off);
+          offset = new_off;
         }
 
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(cfg.poll_interval_ms));
+        // Handle inline-keyboard callback queries.
+        if (upd.contains("callback_query")) {
+          auto &cq = upd["callback_query"];
+
+          // Validate that the response comes from the configured chat.
+          long long from_chat = 0;
+          if (cq.contains("message") && cq["message"].contains("chat")) {
+            from_chat = cq["message"]["chat"].value("id", 0LL);
+          }
+          if (std::to_string(from_chat) != cfg.chat_id)
+            continue;
+
+          std::string cq_id = cq.value("id", "");
+          std::string cb_data = cq.value("data", "");
+
+          if (cb_data == approve_data) {
+            answer_callback_query(cfg.bot_token, cq_id, cfg.proxy,
+                                  cfg.proxy_username, cfg.proxy_password);
+            send_telegram_message(cfg.bot_token, cfg.chat_id,
+                                  "✅ Approved: <code>" + req.id + "</code>",
+                                  cfg.proxy, cfg.proxy_username,
+                                  cfg.proxy_password);
+            return true;
+          }
+          if (cb_data == deny_data) {
+            answer_callback_query(cfg.bot_token, cq_id, cfg.proxy,
+                                  cfg.proxy_username, cfg.proxy_password);
+            send_telegram_message(cfg.bot_token, cfg.chat_id,
+                                  "❌ Denied: <code>" + req.id + "</code>",
+                                  cfg.proxy, cfg.proxy_username,
+                                  cfg.proxy_password);
+            reason = "Request denied via Telegram";
+            return false;
+          }
+        }
+      }
     }
 
-    reason = "Approval timed out after " + std::to_string(cfg.timeout_seconds) + " seconds";
-    send_telegram_message(cfg.bot_token, cfg.chat_id,
-        "⏰ Timed out: <code>" + req.id + "</code>");
-    return false;
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(cfg.poll_interval_ms));
+  }
+
+  reason = "Approval timed out after " + std::to_string(cfg.timeout_seconds) +
+           " seconds";
+  send_telegram_message(cfg.bot_token, cfg.chat_id,
+                        "⏰ Timed out: <code>" + req.id + "</code>", cfg.proxy,
+                        cfg.proxy_username, cfg.proxy_password);
+  return false;
 }

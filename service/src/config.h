@@ -7,6 +7,9 @@
 struct TelegramConfig {
     std::string bot_token;
     std::string chat_id;
+    std::string proxy;
+    std::string proxy_username;
+    std::string proxy_password;
     uint32_t timeout_seconds = 300;  // Wait up to 5 minutes for approval
     uint32_t poll_interval_ms = 2000; // Poll every 2 seconds
 };

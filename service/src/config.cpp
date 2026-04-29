@@ -1,7 +1,6 @@
 #include "config.h"
 
 #include <fstream>
-#include <stdexcept>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -48,6 +47,15 @@ ServiceConfig load_config(const std::string& path) {
             }
             if (t.contains("chat_id") && t["chat_id"].is_string()) {
                 cfg.approval.telegram.chat_id = t["chat_id"].get<std::string>();
+            }
+            if (t.contains("proxy") && t["proxy"].is_string()) {
+                cfg.approval.telegram.proxy = t["proxy"].get<std::string>();
+            }
+            if (t.contains("proxy_username") && t["proxy_username"].is_string()) {
+                cfg.approval.telegram.proxy_username = t["proxy_username"].get<std::string>();
+            }
+            if (t.contains("proxy_password") && t["proxy_password"].is_string()) {
+                cfg.approval.telegram.proxy_password = t["proxy_password"].get<std::string>();
             }
             if (t.contains("timeout_seconds") && t["timeout_seconds"].is_number_unsigned()) {
                 cfg.approval.telegram.timeout_seconds = t["timeout_seconds"].get<uint32_t>();

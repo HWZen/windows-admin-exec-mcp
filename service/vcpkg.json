@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "dependencies": [
     "nlohmann-json",
-    "curl"
+    {
+      "name": "curl",
+      "features": ["ssl"]
+    }
   ]
 }
