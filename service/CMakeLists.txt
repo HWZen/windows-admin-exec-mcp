@@ -11,6 +11,7 @@ endif()
 
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(CURL CONFIG REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
 
 add_executable(AdminExecMCP
     src/main.cpp
@@ -18,7 +19,9 @@ add_executable(AdminExecMCP
     src/tcp_server.cpp
     src/command_executor.cpp
     src/telegram_approver.cpp
+    src/qq_approver.cpp
     src/config.cpp
+    src/logger.cpp
 )
 
 target_include_directories(AdminExecMCP PRIVATE src)
@@ -26,8 +29,10 @@ target_include_directories(AdminExecMCP PRIVATE src)
 target_link_libraries(AdminExecMCP PRIVATE
     nlohmann_json::nlohmann_json
     CURL::libcurl
+    spdlog::spdlog
     ws2_32        # Winsock2
     advapi32      # Windows service APIs
+    winhttp       # WebSocket gateway for QQ bot approval
 )
 
 # Require Windows

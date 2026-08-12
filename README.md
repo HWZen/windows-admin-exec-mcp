@@ -15,7 +15,7 @@ MCP for Windows systems to execute instructions with administrator privileges.
 │     ↓ TCP JSON (localhost:12380)                        │
 │  C++ Windows Service  (service/)                        │
 │     • Runs as LocalSystem (administrator)               │
-│     • Optional Telegram approval gate                   │
+│     • Optional Telegram / QQ bot approval gate          │
 │     • Executes cmd.exe /c <command>                     │
 │     • Returns stdout / stderr / exit code               │
 └─────────────────────────────────────────────────────────┘
@@ -149,7 +149,49 @@ Reply:
   /deny_<uuid>     — to deny
 ```
 
-### 5. (Optional) OpenClaw Skill
+### 5. (Optional) Enable QQ Bot Approval
+
+Edit `config.json` next to `AdminExecMCP.exe`:
+
+```json
+{
+  "approval": {
+    "enabled": true,
+    "type": "qq",
+    "qq": {
+      "app_id": "YOUR_QQ_BOT_APP_ID",
+      "app_secret": "YOUR_QQ_BOT_APP_SECRET",
+      "user_openid": "",
+      "timeout_seconds": 300
+    }
+  }
+}
+```
+
+Restart the service after editing:
+
+```bat
+net stop AdminExecMCP && net start AdminExecMCP
+```
+
+When the AI calls `execute_command`, the service will send a QQ **single-chat
+(C2C)** message with inline-keyboard Approve / Deny buttons.  The service
+maintains a persistent WebSocket connection to the QQ bot gateway to receive
+button-click callbacks in real time.
+
+> **Prerequisites**:
+> - Register a bot on the [QQ Open Platform](https://q.qq.com/) and obtain the
+>   `AppID` and `AppSecret`.
+> - Add the bot as a QQ friend.
+> - **Auto-capture**: if `user_openid` is left empty, the service will
+>   automatically capture it from the first message you send to the bot.
+>   Simply send any message (e.g. "hello") to the bot after starting the
+>   service.  The captured `user_openid` will be used for all subsequent
+>   approval notifications.
+> - To find your `user_openid` manually, check the service log output after
+>   sending a message to the bot.
+
+### 6. (Optional) OpenClaw Skill
 
 ```python
 import importlib.util
@@ -176,7 +218,7 @@ for skill in module.SKILLS:
 
 - The service binds **only to `127.0.0.1`** (localhost) by default; it is not
   accessible from the network.
-- Enable **Telegram approval** (`approval.enabled = true`) to require explicit
+- Enable **Telegram or QQ bot approval** (`approval.enabled = true`) to require explicit
   human sign-off for every command the AI attempts to run.
 - The service runs as `LocalSystem`. Commands it executes inherit this token and
   have full administrator access to the local machine.
@@ -198,6 +240,7 @@ pytest tests/
 | Layer | Technology |
 |-------|-----------|
 | C++ service | C++20, CMake 3.25+, VS 2022, [vcpkg](https://vcpkg.io) |
-| C++ dependencies | [nlohmann/json](https://github.com/nlohmann/json), [libcurl](https://curl.se/libcurl/) |
+| C++ dependencies | [nlohmann/json](https://github.com/nlohmann/json), [libcurl](https://curl.se/libcurl/), WinHTTP (WebSocket) |
 | Python clients | Python 3.12, [mcp](https://pypi.org/project/mcp/) |
 | Telegram integration | Telegram Bot API via libcurl (C++) |
+| QQ bot integration | QQ Bot API v2 via libcurl (HTTP) + WinHTTP (WebSocket gateway) |

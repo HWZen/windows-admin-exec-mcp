@@ -51,4 +51,13 @@ desktop.ini
 
 .cache/*
 service/build/*
+service/build-rel/*
+service/build-ninja/*
 service/cmake-*
+
+# Local config (contains secrets — use config.example.json as template)
+service/config.json
+
+# Local build scripts (machine-specific paths)
+service/build-rel.bat
+service/build-ninja.bat

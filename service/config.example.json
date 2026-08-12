@@ -14,6 +14,12 @@
       "proxy_password": "",
       "timeout_seconds": 300,
       "poll_interval_ms": 2000
+    },
+    "qq": {
+      "app_id": "YOUR_QQ_BOT_APP_ID",
+      "app_secret": "YOUR_QQ_BOT_APP_SECRET",
+      "user_openid": "",
+      "timeout_seconds": 300
     }
   }
 }

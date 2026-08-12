@@ -1,6 +1,7 @@
 #include "tcp_server.h"
 #include "command_executor.h"
 #include "telegram_approver.h"
+#include "qq_approver.h"
 #include "protocol.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -11,6 +12,8 @@
 #include <windows.h>
 
 #include <nlohmann/json.hpp>
+
+#include <spdlog/spdlog.h>
 
 #include <thread>
 #include <string>
@@ -127,7 +130,8 @@ std::string serialize_response(const CommandResponse& resp) {
 }
 
 // Handle a single client connection in its own thread.
-void handle_client(SOCKET client_sock, const ServiceConfig& cfg, TelegramApprover* approver) {
+void handle_client(SOCKET client_sock, const ServiceConfig& cfg,
+                   TelegramApprover* tg_approver, QQApprover* qq_approver) {
     // Set a receive timeout so a stalled client won't hold a thread forever
     DWORD timeout_ms = 30 * 1000; // 30 seconds for receiving a request
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO,
@@ -156,9 +160,20 @@ void handle_client(SOCKET client_sock, const ServiceConfig& cfg, TelegramApprove
     // Catch any exception, report it back to the caller instead of crashing.
     try {
         // Approval gate (optional)
-        if (cfg.approval.enabled && cfg.approval.type == "telegram") {
+        if (cfg.approval.enabled && cfg.approval.type == "telegram" && tg_approver) {
             std::string reason;
-            if (approver && !approver->request_approval(cfg.approval.telegram, req, reason)) {
+            if (!tg_approver->request_approval(cfg.approval.telegram, req, reason)) {
+                resp.success       = false;
+                resp.error_message = "Approval denied: " + reason;
+                send_message(client_sock, serialize_response(resp));
+                closesocket(client_sock);
+                return;
+            }
+        }
+
+        if (cfg.approval.enabled && cfg.approval.type == "qq" && qq_approver) {
+            std::string reason;
+            if (!qq_approver->request_approval(cfg.approval.qq, req, reason)) {
                 resp.success       = false;
                 resp.error_message = "Approval denied: " + reason;
                 send_message(client_sock, serialize_response(resp));
@@ -232,9 +247,17 @@ void TcpServer::run() {
     }
 
     // Set a select timeout so stop() takes effect promptly
-    TelegramApprover *approver = nullptr;
+    TelegramApprover *tg_approver = nullptr;
+    QQApprover *qq_approver = nullptr;
     if (cfg_.approval.enabled && cfg_.approval.type == "telegram") {
-        approver = new TelegramApprover();
+        tg_approver = new TelegramApprover();
+    } else if (cfg_.approval.enabled && cfg_.approval.type == "qq") {
+        qq_approver = new QQApprover();
+        if (!qq_approver->start(cfg_.approval.qq, cfg_.config_path)) {
+            spdlog::error("Failed to start QQ approver — approval will be unavailable");
+            delete qq_approver;
+            qq_approver = nullptr;
+        }
     }
     while (running_) {
         fd_set rfds;
@@ -250,11 +273,15 @@ void TcpServer::run() {
 
         // Spawn a detached thread per connection.
         // TODO: limit concurrent threads to avoid resource exhaustion under heavy load.
-        std::thread([client, this, approver]() {
-            handle_client(client, cfg_, approver);
+        std::thread([client, this, tg_approver, qq_approver]() {
+            handle_client(client, cfg_, tg_approver, qq_approver);
         }).detach();
     }
-    delete approver;
+    if (qq_approver) {
+        qq_approver->stop();
+        delete qq_approver;
+    }
+    delete tg_approver;
 
     closesocket(listen_sock);
 }

@@ -3,6 +3,8 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
+#include <spdlog/spdlog.h>
+
 #include <chrono>
 #include <mutex>
 #include <sstream>
@@ -48,7 +50,7 @@ std::string http_get(const std::string& url,
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
-        std::cerr << "HTTP request failed: " << curl_easy_strerror(res) << std::endl;
+        spdlog::error("HTTP request failed: {}", curl_easy_strerror(res));
         return {};
     }
     return response;
@@ -85,7 +87,7 @@ std::string http_post_json(const std::string& url,
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
-        std::cerr << "HTTP request failed: " << curl_easy_strerror(res) << std::endl;
+        spdlog::error("HTTP request failed: {}", curl_easy_strerror(res));
         return {};
     }
     return response;

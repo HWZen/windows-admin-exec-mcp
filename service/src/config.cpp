@@ -64,6 +64,22 @@ ServiceConfig load_config(const std::string& path) {
                 cfg.approval.telegram.poll_interval_ms = t["poll_interval_ms"].get<uint32_t>();
             }
         }
+
+        if (a.contains("qq") && a["qq"].is_object()) {
+            auto& q = a["qq"];
+            if (q.contains("app_id") && q["app_id"].is_string()) {
+                cfg.approval.qq.app_id = q["app_id"].get<std::string>();
+            }
+            if (q.contains("app_secret") && q["app_secret"].is_string()) {
+                cfg.approval.qq.app_secret = q["app_secret"].get<std::string>();
+            }
+            if (q.contains("user_openid") && q["user_openid"].is_string()) {
+                cfg.approval.qq.user_openid = q["user_openid"].get<std::string>();
+            }
+            if (q.contains("timeout_seconds") && q["timeout_seconds"].is_number_unsigned()) {
+                cfg.approval.qq.timeout_seconds = q["timeout_seconds"].get<uint32_t>();
+            }
+        }
     }
 
     return cfg;
