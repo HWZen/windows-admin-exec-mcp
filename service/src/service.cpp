@@ -20,7 +20,6 @@ static constexpr wchar_t kServiceDescription[] =
 
 static SERVICE_STATUS          g_status{};
 static SERVICE_STATUS_HANDLE   g_status_handle{};
-static HANDLE                  g_stop_event{};
 static TcpServer*              g_server_ptr = nullptr;
 
 // ---------------------------------------------------------------------------
@@ -48,7 +47,6 @@ static VOID WINAPI service_ctrl_handler(DWORD ctrl) {
     case SERVICE_CONTROL_SHUTDOWN:
         report_status(SERVICE_STOP_PENDING, NO_ERROR, 3000);
         if (g_server_ptr) g_server_ptr->stop();
-        SetEvent(g_stop_event);
         break;
     default:
         break;
@@ -63,8 +61,6 @@ static VOID WINAPI service_ctrl_handler(DWORD ctrl) {
 static const ServiceConfig* g_cfg_ptr = nullptr;
 
 static VOID WINAPI service_entry(DWORD /*argc*/, LPWSTR* /*argv*/) {
-    g_stop_event = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-
     g_status.dwServiceType             = SERVICE_WIN32_OWN_PROCESS;
     g_status.dwControlsAccepted        = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
 
@@ -82,7 +78,6 @@ static VOID WINAPI service_entry(DWORD /*argc*/, LPWSTR* /*argv*/) {
     server.run();
 
     report_status(SERVICE_STOPPED);
-    CloseHandle(g_stop_event);
 }
 
 // ---------------------------------------------------------------------------

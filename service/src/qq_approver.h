@@ -1,7 +1,6 @@
 #pragma once
 
-#include "config.h"
-#include "protocol.h"
+#include "approver.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -20,38 +19,36 @@
 // TcpServer; each request_approval() call sends a group message with
 // inline-keyboard Approve/Deny buttons and blocks until the matching
 // callback arrives (or the timeout expires).
-class QQApprover {
+class QQApprover : public Approver {
 public:
     QQApprover();
-    ~QQApprover();
+    ~QQApprover() override;
 
     // Non-copyable / non-movable (owns threads + WinHTTP handles).
     QQApprover(const QQApprover&) = delete;
     QQApprover& operator=(const QQApprover&) = delete;
 
     // Connect to the QQ bot WebSocket gateway and start background
-    // heartbeat / receive threads.  config_path is the path to config.json
-    // so the captured user_openid can be persisted.  Returns true on success.
-    bool start(const QQConfig& cfg, const std::string& config_path);
+    // heartbeat / receive threads.  Returns true on success.
+    bool start(const ServiceConfig& cfg) override;
 
     // Signal background threads to stop, close the WebSocket, and join.
-    void stop();
+    void stop() override;
 
     // Send an approval request via QQ bot and block until the user
     // responds (or the timeout expires).  Returns true if approved.
-    bool request_approval(const QQConfig& cfg, const CommandRequest& req,
-                          std::string& reason);
+    bool request_approval(const CommandRequest& req, std::string& reason) override;
 
 private:
     // ---- Access-token management (libcurl HTTP) ----
-    bool refresh_access_token(const QQConfig& cfg);
-    std::string get_valid_token(const QQConfig& cfg);
+    bool refresh_access_token();
+    std::string get_valid_token();
 
     // ---- HTTP helpers (libcurl) ----
-    static std::string http_request(const std::string& url,
-                                    const std::string& method,
-                                    const std::string& body,
-                                    const std::string& auth);
+    std::string http_request(const std::string& url,
+                             const std::string& method,
+                             const std::string& body,
+                             const std::string& auth);
 
     // ---- QQ Bot API helpers ----
     bool send_approval_message(const std::string& access_token,
@@ -61,7 +58,7 @@ private:
     void acknowledge_interaction(const std::string& interaction_id);
 
     // ---- WebSocket gateway (WinHTTP) ----
-    bool connect_websocket(const QQConfig& cfg);
+    bool connect_websocket();
     void disconnect_websocket();
     bool ws_send_message(const std::string& msg);
     bool ws_receive_message(std::string& out);
@@ -83,6 +80,7 @@ private:
     // ---- Stored config (for background threads) ----
     QQConfig cfg_;
     std::string config_path_;  // For persisting captured user_openid
+    bool ssl_verify_ = true;   // SEC-C2: copied from ServiceConfig
 
     // ---- Last received C2C msg_id (for passive replies) ----
     std::mutex msg_id_mtx_;
@@ -112,9 +110,6 @@ private:
     // ---- Approval matching ----
     // Per-request approval results keyed by request id:
     //   0 = pending, 1 = approved, 2 = denied.
-    // Each concurrent request gets its own entry so a button callback can
-    // only resolve its own request; no shared pending state can be
-    // overwritten by a racing request.
     std::mutex approval_mtx_;
     std::condition_variable approval_cv_;
     std::unordered_map<std::string, int> pending_results_;

@@ -36,7 +36,10 @@ struct ApprovalConfig {
 struct ServiceConfig {
     uint16_t port = 12380;
     std::string bind_address = "127.0.0.1";
-    uint32_t max_connections = 16;
+    uint32_t listen_backlog = 16;          // listen() backlog (renamed from max_connections)
+    uint32_t max_concurrent_clients = 16;  // max concurrent client threads; 0 = unlimited
+    bool ssl_verify = true;                // verify TLS certs on outbound HTTPS (Telegram/QQ)
+    std::string log_level = "info";        // trace/debug/info/warn/error/critical/off
     ApprovalConfig approval;
     std::string config_path;  // Path to config.json (set by main, not parsed from JSON)
 };

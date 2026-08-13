@@ -2,7 +2,10 @@
   "_comment": "Copy this file to config.json in the same directory as AdminExecMCP.exe",
   "port": 12380,
   "bind_address": "127.0.0.1",
-  "max_connections": 16,
+  "listen_backlog": 16,
+  "max_concurrent_clients": 16,
+  "ssl_verify": true,
+  "log_level": "info",
   "approval": {
     "enabled": false,
     "type": "telegram",

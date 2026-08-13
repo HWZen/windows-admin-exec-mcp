@@ -37,7 +37,8 @@ size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
 std::string http_request_impl(const std::string& url,
                               const std::string& method,
                               const std::string& body,
-                              const std::string& auth) {
+                              const std::string& auth,
+                              bool ssl_verify) {
     CURL* curl = curl_easy_init();
     if (!curl) return {};
 
@@ -56,7 +57,8 @@ std::string http_request_impl(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, ssl_verify ? 1L : 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, ssl_verify ? 2L : 0L);
 
     if (method == "POST") {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -138,18 +140,19 @@ QQApprover::QQApprover() = default;
 
 QQApprover::~QQApprover() { stop(); }
 
-bool QQApprover::start(const QQConfig& cfg, const std::string& config_path) {
-    cfg_ = cfg;
-    config_path_ = config_path;
+bool QQApprover::start(const ServiceConfig& cfg) {
+    cfg_ = cfg.approval.qq;
+    config_path_ = cfg.config_path;
+    ssl_verify_ = cfg.ssl_verify;
     running_ = true;
 
-    if (!refresh_access_token(cfg_)) {
+    if (!refresh_access_token()) {
         spdlog::error("QQ: failed to obtain access token");
         running_ = false;
         return false;
     }
 
-    if (!connect_websocket(cfg_)) {
+    if (!connect_websocket()) {
         spdlog::error("QQ: failed to connect WebSocket gateway");
         running_ = false;
         return false;
@@ -184,13 +187,14 @@ void QQApprover::stop() {
 // Access-token management
 // ===========================================================================
 
-bool QQApprover::refresh_access_token(const QQConfig& cfg) {
+bool QQApprover::refresh_access_token() {
     json body;
-    body["appId"]        = cfg.app_id;
-    body["clientSecret"] = cfg.app_secret;
+    body["appId"]        = cfg_.app_id;
+    body["clientSecret"] = cfg_.app_secret;
 
     std::string resp = http_request_impl(
-        "https://api.bot.qq.com/app/getAppAccessToken", "POST", body.dump(), "");
+        "https://api.bot.qq.com/app/getAppAccessToken", "POST", body.dump(), "",
+        ssl_verify_);
 
     if (resp.empty()) return false;
 
@@ -216,7 +220,7 @@ bool QQApprover::refresh_access_token(const QQConfig& cfg) {
     }
 }
 
-std::string QQApprover::get_valid_token(const QQConfig& cfg) {
+std::string QQApprover::get_valid_token() {
     {
         std::lock_guard<std::mutex> lock(token_mtx_);
         if (!access_token_.empty() && now_unix_seconds() < token_expires_at_) {
@@ -224,7 +228,7 @@ std::string QQApprover::get_valid_token(const QQConfig& cfg) {
         }
     }
     // Token is missing or about to expire — refresh outside the lock.
-    if (!refresh_access_token(cfg)) return "";
+    if (!refresh_access_token()) return "";
     std::lock_guard<std::mutex> lock(token_mtx_);
     return access_token_;
 }
@@ -237,7 +241,7 @@ std::string QQApprover::http_request(const std::string& url,
                                      const std::string& method,
                                      const std::string& body,
                                      const std::string& auth) {
-    return http_request_impl(url, method, body, auth);
+    return http_request_impl(url, method, body, auth, ssl_verify_);
 }
 
 // ===========================================================================
@@ -340,7 +344,7 @@ bool QQApprover::send_qq_message(const std::string& access_token,
 }
 
 void QQApprover::acknowledge_interaction(const std::string& interaction_id) {
-    std::string token = get_valid_token(cfg_);
+    std::string token = get_valid_token();
     if (token.empty()) return;
 
     std::string url = "https://api.bot.qq.com/interactions/" + interaction_id;
@@ -354,8 +358,8 @@ void QQApprover::acknowledge_interaction(const std::string& interaction_id) {
 // WebSocket gateway — connect / disconnect / send / receive
 // ===========================================================================
 
-bool QQApprover::connect_websocket(const QQConfig& cfg) {
-    std::string token = get_valid_token(cfg);
+bool QQApprover::connect_websocket() {
+    std::string token = get_valid_token();
     if (token.empty()) return false;
 
     // 1. Get the WSS gateway URL.
@@ -571,13 +575,19 @@ void QQApprover::receive_loop() {
             std::this_thread::sleep_for(std::chrono::seconds(5));
             if (!running_) break;
 
+            // Join the previous heartbeat thread BEFORE closing the old handle
+            // so we never close a handle that a heartbeat send() may still be
+            // blocked on (BUG-M2). ws_connected_ is already false here, so the
+            // old heartbeat loop is exiting; joining guarantees it is fully
+            // done with the old handle before we tear it down and reconnect.
+            if (heartbeat_thread_.joinable()) heartbeat_thread_.join();
+
             disconnect_websocket();
-            if (!connect_websocket(cfg_)) {
+            if (!connect_websocket()) {
                 spdlog::warn("QQ: reconnection failed — retrying");
                 continue;
             }
 
-            if (heartbeat_thread_.joinable()) heartbeat_thread_.join();
             heartbeat_thread_ = std::thread(&QQApprover::heartbeat_loop, this);
             spdlog::info("QQ: reconnected, session={}", session_id_);
         }
@@ -706,7 +716,7 @@ void QQApprover::on_c2c_message_create(const std::string& event_body) {
         if (was_empty) {
             persist_user_openid(openid);
             // Send a confirmation reply so the user gets visible feedback.
-            std::string token = get_valid_token(cfg_);
+            std::string token = get_valid_token();
             if (!token.empty()) {
                 send_qq_message(token,
                     "✅ user_openid 已捕获，审批通知已就绪。"
@@ -764,15 +774,14 @@ void QQApprover::on_interaction_create(const std::string& event_body) {
 // request_approval — the main entry point called per command
 // ===========================================================================
 
-bool QQApprover::request_approval(const QQConfig& cfg,
-                                  const CommandRequest& req,
+bool QQApprover::request_approval(const CommandRequest& req,
                                   std::string& reason) {
     if (!ws_connected_) {
         reason = "QQ WebSocket gateway is not connected";
         return false;
     }
 
-    std::string token = get_valid_token(cfg);
+    std::string token = get_valid_token();
     if (token.empty()) {
         reason = "Failed to obtain QQ access token";
         return false;
@@ -809,7 +818,7 @@ bool QQApprover::request_approval(const QQConfig& cfg,
     {
         std::unique_lock<std::mutex> lock(approval_mtx_);
         got_response = approval_cv_.wait_for(
-            lock, std::chrono::seconds(cfg.timeout_seconds),
+            lock, std::chrono::seconds(cfg_.timeout_seconds),
             [this, &req] {
                 auto it = pending_results_.find(req.id);
                 return (it != pending_results_.end() && it->second != 0) ||
@@ -838,7 +847,7 @@ bool QQApprover::request_approval(const QQConfig& cfg,
 
     if (!got_response || result == 0) {
         reason = "Approval timed out after " +
-                 std::to_string(cfg.timeout_seconds) + " seconds";
+                 std::to_string(cfg_.timeout_seconds) + " seconds";
         send_qq_message(token, "⏰ Timed out: " + req.id);
         return false;
     }

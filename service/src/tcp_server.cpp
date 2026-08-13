@@ -18,6 +18,7 @@
 #include <thread>
 #include <string>
 #include <stdexcept>
+#include <memory>
 #include <cstring>
 #include <cstddef>
 
@@ -28,7 +29,6 @@ using json = nlohmann::json;
 // ---------------------------------------------------------------------------
 
 namespace {
-
 
 bool send_all(SOCKET s, const char* buf, int len) {
     int sent = 0;
@@ -86,11 +86,6 @@ static constexpr size_t kMaxResponseBytes = 16ULL * 1024 * 1024;
 static constexpr size_t kOutputBudget = kMaxResponseBytes - 1024 * 1024;
 
 // Serialize CommandResponse to JSON.
-// Uses error_handler_t::replace so residual non-UTF-8 bytes (if any) are
-// replaced with U+FFFD rather than throwing an exception.
-// If the serialized size would exceed 16 MB, stdout and stderr are truncated
-// proportionally (each by its share of the total output size) and an
-// informational error_message is included.
 std::string serialize_response(const CommandResponse& resp) {
     json j;
     j["id"]            = resp.id;
@@ -106,11 +101,8 @@ std::string serialize_response(const CommandResponse& resp) {
         return result;
     }
 
-    // Output too large — truncate stdout / stderr proportionally.
     size_t out_len = resp.stdout_output.size() + resp.stderr_output.size();
     if (out_len > 0) {
-        // Apply a 10% extra margin so the re-serialized result stays under
-        // the limit even after adding the truncation warning message.
         double factor = static_cast<double>(kOutputBudget) / static_cast<double>(out_len) * 0.9;
         if (factor > 1.0) factor = 1.0;
 
@@ -130,11 +122,16 @@ std::string serialize_response(const CommandResponse& resp) {
 }
 
 // Handle a single client connection in its own thread.
-void handle_client(SOCKET client_sock, const ServiceConfig& cfg,
-                   TelegramApprover* tg_approver, QQApprover* qq_approver) {
-    // Set a receive timeout so a stalled client won't hold a thread forever
-    DWORD timeout_ms = 30 * 1000; // 30 seconds for receiving a request
+void handle_client(SOCKET client_sock,
+                   const std::shared_ptr<Approver>& approver,
+                   const std::shared_ptr<CommandExecutor>& executor) {
+    // Set receive/send timeouts so a stalled client won't hold a thread
+    // forever (BUG-L3: send_all previously had no timeout and could block
+    // indefinitely if the client stopped reading the response).
+    DWORD timeout_ms = 30 * 1000; // 30 seconds
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
+    setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO,
                reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
 
     std::string raw;
@@ -159,10 +156,10 @@ void handle_client(SOCKET client_sock, const ServiceConfig& cfg,
     // Everything from here is in the context of this client's request.
     // Catch any exception, report it back to the caller instead of crashing.
     try {
-        // Approval gate (optional)
-        if (cfg.approval.enabled && cfg.approval.type == "telegram" && tg_approver) {
+        // Approval gate (optional) — via the unified Approver interface.
+        if (approver) {
             std::string reason;
-            if (!tg_approver->request_approval(cfg.approval.telegram, req, reason)) {
+            if (!approver->request_approval(req, reason)) {
                 resp.success       = false;
                 resp.error_message = "Approval denied: " + reason;
                 send_message(client_sock, serialize_response(resp));
@@ -171,18 +168,7 @@ void handle_client(SOCKET client_sock, const ServiceConfig& cfg,
             }
         }
 
-        if (cfg.approval.enabled && cfg.approval.type == "qq" && qq_approver) {
-            std::string reason;
-            if (!qq_approver->request_approval(cfg.approval.qq, req, reason)) {
-                resp.success       = false;
-                resp.error_message = "Approval denied: " + reason;
-                send_message(client_sock, serialize_response(resp));
-                closesocket(client_sock);
-                return;
-            }
-        }
-
-        execute_command(req, resp);
+        executor->execute(req, resp);
         send_message(client_sock, serialize_response(resp));
     } catch (const std::exception& e) {
         resp.success = false;
@@ -195,6 +181,29 @@ void handle_client(SOCKET client_sock, const ServiceConfig& cfg,
     }
 
     closesocket(client_sock);
+}
+
+// Instantiate the configured approval backend, or return nullptr if approval
+// is disabled or could not be started.
+std::shared_ptr<Approver> create_approver(const ServiceConfig& cfg) {
+    if (!cfg.approval.enabled) return nullptr;
+
+    std::shared_ptr<Approver> approver;
+    if (cfg.approval.type == "telegram") {
+        approver = std::make_shared<TelegramApprover>();
+    } else if (cfg.approval.type == "qq") {
+        approver = std::make_shared<QQApprover>();
+    } else {
+        spdlog::warn("unknown approval type '{}' — approval disabled", cfg.approval.type);
+        return nullptr;
+    }
+
+    if (!approver->start(cfg)) {
+        spdlog::error("Failed to start '{}' approver — approval will be unavailable",
+                      cfg.approval.type);
+        approver.reset();
+    }
+    return approver;
 }
 
 } // anonymous namespace
@@ -241,51 +250,105 @@ void TcpServer::run() {
         throw std::runtime_error("bind() failed on port " + std::to_string(cfg_.port));
     }
 
-    if (listen(listen_sock, static_cast<int>(cfg_.max_connections)) == SOCKET_ERROR) {
+    // listen_backlog (renamed from max_connections) is only the accept backlog.
+    if (listen(listen_sock, static_cast<int>(cfg_.listen_backlog)) == SOCKET_ERROR) {
         closesocket(listen_sock);
         throw std::runtime_error("listen() failed");
     }
 
-    // Set a select timeout so stop() takes effect promptly
-    TelegramApprover *tg_approver = nullptr;
-    QQApprover *qq_approver = nullptr;
-    if (cfg_.approval.enabled && cfg_.approval.type == "telegram") {
-        tg_approver = new TelegramApprover();
-    } else if (cfg_.approval.enabled && cfg_.approval.type == "qq") {
-        qq_approver = new QQApprover();
-        if (!qq_approver->start(cfg_.approval.qq, cfg_.config_path)) {
-            spdlog::error("Failed to start QQ approver — approval will be unavailable");
-            delete qq_approver;
-            qq_approver = nullptr;
-        }
-    }
+    approver_ = create_approver(cfg_);
+    executor_ = std::make_shared<CommandExecutor>();
+
     while (running_) {
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(listen_sock, &rfds);
 
-        timeval tv{1, 0}; // 1-second timeout
+        timeval tv{1, 0}; // 1-second timeout so stop() takes effect promptly
         int sel = select(0, &rfds, nullptr, nullptr, &tv);
-        if (sel <= 0) continue;
+        if (sel <= 0) {
+            reap_finished_threads();
+            continue;
+        }
 
         SOCKET client = accept(listen_sock, nullptr, nullptr);
-        if (client == INVALID_SOCKET) continue;
+        if (client == INVALID_SOCKET) {
+            reap_finished_threads();
+            continue;
+        }
 
-        // Spawn a detached thread per connection.
-        // TODO: limit concurrent threads to avoid resource exhaustion under heavy load.
-        std::thread([client, this, tg_approver, qq_approver]() {
-            handle_client(client, cfg_, tg_approver, qq_approver);
-        }).detach();
-    }
-    if (qq_approver) {
-        qq_approver->stop();
-        delete qq_approver;
-    }
-    delete tg_approver;
+        // Enforce the real concurrent-client limit (ARCH-2). Reject the
+        // connection once the limit is reached.
+        if (cfg_.max_concurrent_clients > 0) {
+            int prev = active_clients_.fetch_add(1);
+            if (prev >= static_cast<int>(cfg_.max_concurrent_clients)) {
+                active_clients_.fetch_sub(1);
+                closesocket(client);
+                spdlog::warn("rejecting connection: max_concurrent_clients ({}) reached",
+                             cfg_.max_concurrent_clients);
+                continue;
+            }
+        } else {
+            active_clients_.fetch_add(1);
+        }
 
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        // Copy the shared_ptrs into the worker so the approver/executor stay
+        // alive for as long as any client thread is using them (BUG-H1).
+        auto approver = approver_;
+        auto executor = executor_;
+        std::thread t([client, this, approver, executor, done]() {
+            handle_client(client, approver, executor);
+            active_clients_.fetch_sub(1);
+            done->store(true, std::memory_order_release);
+        });
+
+        reap_finished_threads();
+        {
+            std::lock_guard<std::mutex> lock(threads_mtx_);
+            client_threads_.push_back(ClientThread{std::move(t), done});
+        }
+    }
+
+    // Graceful shutdown (ARCH-7): stop accepting new connections, then join
+    // all in-flight client threads. The approval backend is torn down by
+    // stop() (and again idempotently by its destructor), so run() does not
+    // re-stop it here.
     closesocket(listen_sock);
+
+    join_all_threads();
+
+    // Final safety net: ensure no child process outlives the service.
+    if (executor_) executor_->terminate_all();
+
+    approver_.reset();
+    executor_.reset();
 }
 
 void TcpServer::stop() {
     running_ = false;
+    // Terminate in-flight child processes and stop the approval backend so any
+    // blocked client threads (execution or approval wait) return promptly.
+    if (executor_) executor_->terminate_all();
+    if (approver_) approver_->stop();
+}
+
+void TcpServer::reap_finished_threads() {
+    std::lock_guard<std::mutex> lock(threads_mtx_);
+    for (auto it = client_threads_.begin(); it != client_threads_.end();) {
+        if (it->done->load(std::memory_order_acquire)) {
+            if (it->thread.joinable()) it->thread.join();
+            it = client_threads_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void TcpServer::join_all_threads() {
+    std::lock_guard<std::mutex> lock(threads_mtx_);
+    for (auto& ct : client_threads_) {
+        if (ct.thread.joinable()) ct.thread.join();
+    }
+    client_threads_.clear();
 }

@@ -48,14 +48,23 @@ int wmain(int argc, wchar_t* argv[]) {
     } catch (...) {
     }
 
-    // Initialise the rotating-file logger early.
+    // Initialise the logger first (default level) so config-parse warnings
+    // from load_config() are captured in the log file.
     std::string log_path = path_next_to_exe(L"AdminExecMCP.log");
-    init_logger(log_path);
-    spdlog::info("AdminExecMCP starting (log: {})", log_path);
+    init_logger(log_path, "info");
 
+    // Load config, then apply the configured log level on top of the default.
     std::string cfg_path = path_next_to_exe(L"config.json");
     ServiceConfig cfg = load_config(cfg_path);
     cfg.config_path = cfg_path;
+
+    auto lvl = spdlog::level::from_str(cfg.log_level);
+    if (lvl == spdlog::level::off && cfg.log_level != "off") {
+        lvl = spdlog::level::info;
+    }
+    spdlog::set_level(lvl);
+
+    spdlog::info("AdminExecMCP starting (log: {}, level: {})", log_path, cfg.log_level);
 
     if (argc < 2) {
         service_main(cfg);

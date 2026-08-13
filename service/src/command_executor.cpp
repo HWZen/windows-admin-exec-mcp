@@ -4,10 +4,14 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <string>
-#include <vector>
+
+#include <spdlog/spdlog.h>
+
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -44,9 +48,6 @@ std::string to_utf8(const std::wstring& ws) {
 }
 
 // Return true when every byte in `s` forms a valid UTF-8 sequence.
-// Uses MultiByteToWideChar with MB_ERR_INVALID_CHARS: any invalid byte
-// causes the call to fail and return 0, so `r > 0` means "all bytes are
-// valid UTF-8".  Empty strings are considered valid.
 bool is_valid_utf8(const std::string& s) {
     if (s.empty()) return true;
     int r = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
@@ -56,23 +57,16 @@ bool is_valid_utf8(const std::string& s) {
 }
 
 // Convert a GBK (codepage 936) encoded string to UTF-8.
-// If the bytes cannot be decoded as GBK (which should be rare), non-ASCII
-// bytes are replaced with '?' to guarantee the returned string is always
-// valid UTF-8.
 std::string gbk_to_utf8(const std::string& s) {
     if (s.empty()) return {};
-    // GBK → UTF-16
     int wlen = MultiByteToWideChar(936, 0,
                                    s.data(), static_cast<int>(s.size()),
                                    nullptr, 0);
     if (wlen > 0) {
         std::wstring ws(wlen, L'\0');
         MultiByteToWideChar(936, 0, s.data(), static_cast<int>(s.size()), ws.data(), wlen);
-        // UTF-16 → UTF-8
         return to_utf8(ws);
     }
-    // Fallback: bytes are neither valid UTF-8 nor valid GBK.
-    // Replace every non-ASCII byte with '?' so the result is valid UTF-8.
     std::string result;
     result.reserve(s.size());
     for (unsigned char c : s) {
@@ -81,11 +75,7 @@ std::string gbk_to_utf8(const std::string& s) {
     return result;
 }
 
-// Guarantee the returned string is valid UTF-8.
-// Only UTF-8 and GBK (codepage 936) are considered as input encodings.
-// If the input is not valid UTF-8 it is assumed to be GBK and converted
-// accordingly.  This matches the requirement that only these two encodings
-// need to be supported.
+// Guarantee the returned string is valid UTF-8 (UTF-8 or GBK input).
 std::string ensure_utf8(const std::string& s) {
     if (is_valid_utf8(s)) return s;
     return gbk_to_utf8(s);
@@ -93,8 +83,14 @@ std::string ensure_utf8(const std::string& s) {
 
 } // anonymous namespace
 
-void execute_command(const CommandRequest& req, CommandResponse& resp) {
+void CommandExecutor::execute(const CommandRequest& req, CommandResponse& resp) {
     resp.id = req.id;
+
+    // Audit log (SEC-L3): record what is about to be executed.
+    spdlog::info("AUDIT: execute id={} command=\"{}\" working_dir=\"{}\" timeout={}s",
+                 req.id, req.command, req.working_dir, req.timeout_seconds);
+
+    auto start_time = std::chrono::steady_clock::now();
 
     // Build command line: cmd.exe /c <user_command>
     std::wstring cmdline = L"cmd.exe /c " + to_wide(req.command);
@@ -116,6 +112,7 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
     if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0) ||
         !CreatePipe(&stderr_read, &stderr_write, &sa, 0)) {
         resp.error_message = "Failed to create pipes";
+        spdlog::error("AUDIT: id={} failed: {}", req.id, resp.error_message);
         return;
     }
 
@@ -123,15 +120,12 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
     SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
 
-    // Open the NUL device as an inheritable, read-only handle for the child's
-    // stdin.  Using NUL ensures the child has a valid stdin fd but receives
-    // immediate EOF on any read attempt — no input is forwarded from the
-    // service process.
+    // Open the NUL device as an inheritable, read-only handle for the child's stdin.
     HANDLE nul_handle = CreateFileW(
         L"NUL",
         GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
-        &sa,           // bInheritHandle = TRUE
+        &sa,
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL,
         nullptr
@@ -140,6 +134,7 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
         CloseHandle(stdout_read);
         CloseHandle(stderr_read);
         resp.error_message = "Failed to open NUL device for child stdin";
+        spdlog::error("AUDIT: id={} failed: {}", req.id, resp.error_message);
         return;
     }
 
@@ -167,7 +162,6 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
     );
 
     // Close the write ends in the parent immediately after spawning.
-    // Also close the NUL handle — the child already inherited its own copy.
     CloseHandle(stdout_write);
     CloseHandle(stderr_write);
     if (nul_handle != INVALID_HANDLE_VALUE) CloseHandle(nul_handle);
@@ -177,24 +171,25 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
         CloseHandle(stderr_read);
         DWORD err = GetLastError();
         resp.error_message = "CreateProcess failed, error code: " + std::to_string(err);
+        spdlog::error("AUDIT: id={} failed: {}", req.id, resp.error_message);
         return;
     }
 
-    // Wait for the process to finish, draining stdout/stderr in 1-second
-    // slices to avoid pipe buffer deadlocks.  The child may block on a full
-    // pipe write if the parent doesn't read; polling with PeekNamedPipe
-    // prevents that while still respecting the overall timeout.
+    // Register the child process handle so shutdown can terminate it (ARCH-7).
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        active_processes_.push_back(pi.hProcess);
+    }
+
     const bool infinite_wait = (req.timeout_seconds == 0);
     const DWORD timeout_ms   = infinite_wait
         ? 0u
         : static_cast<DWORD>(req.timeout_seconds) * 1000u;
 
-    auto start_time = std::chrono::steady_clock::now();
     bool timed_out  = false;
 
     while (true) {
         DWORD slice = WaitForSingleObject(pi.hProcess, 1000); // 1-second poll slice
-        // Drain whatever output became available during this slice.
         peek_and_read(stdout_read, resp.stdout_output);
         peek_and_read(stderr_read, resp.stderr_output);
 
@@ -202,14 +197,12 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
             break; // Process finished
         }
 
-        // WAIT_TIMEOUT: check against the total configured timeout.
         if (!infinite_wait) {
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start_time).count();
             if (static_cast<DWORD>(elapsed_ms) >= timeout_ms) {
                 TerminateProcess(pi.hProcess, 1);
                 WaitForSingleObject(pi.hProcess, 5000);
-                // Final drain after forced termination.
                 peek_and_read(stdout_read, resp.stdout_output);
                 peek_and_read(stderr_read, resp.stderr_output);
                 timed_out = true;
@@ -218,9 +211,22 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
         }
     }
 
+    // Unregister the child process handle now that it has finished.
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        auto it = std::find(active_processes_.begin(), active_processes_.end(), pi.hProcess);
+        if (it != active_processes_.end()) active_processes_.erase(it);
+    }
+
+    // Check the return value of GetExitCodeProcess; a failure here must not be
+    // misreported as a successful exit code of 0 (BUG-L2).
     DWORD exit_code = 0;
-    GetExitCodeProcess(pi.hProcess, &exit_code);
-    resp.exit_code = static_cast<int>(exit_code);
+    if (!GetExitCodeProcess(pi.hProcess, &exit_code)) {
+        spdlog::error("AUDIT: id={} GetExitCodeProcess failed (error {})", req.id, GetLastError());
+        resp.exit_code = -1;
+    } else {
+        resp.exit_code = static_cast<int>(exit_code);
+    }
 
     CloseHandle(stdout_read);
     CloseHandle(stderr_read);
@@ -236,5 +242,23 @@ void execute_command(const CommandRequest& req, CommandResponse& resp) {
         resp.success = false;
     } else {
         resp.success = true;
+    }
+
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_time).count();
+
+    spdlog::info("AUDIT: complete id={} success={} exit_code={} stdout_bytes={} stderr_bytes={} duration_ms={}",
+                 req.id, resp.success, resp.exit_code,
+                 resp.stdout_output.size(), resp.stderr_output.size(), elapsed_ms);
+}
+
+void CommandExecutor::terminate_all() {
+    // Hold the lock while terminating so a concurrently-finishing execute()
+    // cannot close a handle between our read and TerminateProcess.
+    std::lock_guard<std::mutex> lock(mtx_);
+    for (void* h : active_processes_) {
+        if (h) {
+            TerminateProcess(static_cast<HANDLE>(h), 1);
+        }
     }
 }
