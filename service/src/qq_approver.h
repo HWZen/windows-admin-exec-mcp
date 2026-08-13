@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 // QQApprover — approval gate backed by a QQ Bot.
 //
@@ -109,11 +110,14 @@ private:
     std::string session_id_;
 
     // ---- Approval matching ----
+    // Per-request approval results keyed by request id:
+    //   0 = pending, 1 = approved, 2 = denied.
+    // Each concurrent request gets its own entry so a button callback can
+    // only resolve its own request; no shared pending state can be
+    // overwritten by a racing request.
     std::mutex approval_mtx_;
     std::condition_variable approval_cv_;
-    std::string pending_approve_data_;
-    std::string pending_deny_data_;
-    std::atomic<int> approval_result_{0};  // 0=pending, 1=approved, 2=denied
+    std::unordered_map<std::string, int> pending_results_;
 
     // ---- Auto-captured user_openid (from first C2C message) ----
     mutable std::mutex openid_mtx_;

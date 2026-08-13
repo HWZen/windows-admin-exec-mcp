@@ -740,17 +740,24 @@ void QQApprover::on_interaction_create(const std::string& event_body) {
         acknowledge_interaction(interaction_id);
     }
 
-    // Match against the pending approval.
-    std::lock_guard<std::mutex> lock(approval_mtx_);
-    if (approval_result_ != 0) return; // No pending request or already resolved.
-
-    if (button_data == pending_approve_data_) {
-        approval_result_ = 1; // Approved
-        approval_cv_.notify_one();
-    } else if (button_data == pending_deny_data_) {
-        approval_result_ = 2; // Denied
-        approval_cv_.notify_one();
+    // Button data format is "approve_<req.id>" or "deny_<req.id>".
+    std::string req_id;
+    if (button_data.rfind("approve_", 0) == 0) {
+        req_id = button_data.substr(8);
+    } else if (button_data.rfind("deny_", 0) == 0) {
+        req_id = button_data.substr(5);
+    } else {
+        return;
     }
+
+    // Resolve only the request identified by the button data.  Each request
+    // keeps its own map entry, so a callback can never touch another
+    // request's pending state.
+    std::lock_guard<std::mutex> lock(approval_mtx_);
+    auto it = pending_results_.find(req_id);
+    if (it == pending_results_.end() || it->second != 0) return;
+    it->second = (button_data[0] == 'a') ? 1 : 2;  // 1=approved, 2=denied
+    approval_cv_.notify_all();
 }
 
 // ===========================================================================
@@ -777,41 +784,66 @@ bool QQApprover::request_approval(const QQConfig& cfg,
         return false;
     }
 
-    // Hold the lock for the entire approval cycle so that concurrent
-    // requests are serialized and cannot overwrite each other's
-    // pending matching data.
-    std::unique_lock<std::mutex> lock(approval_mtx_);
-
-    pending_approve_data_ = "approve_" + req.id;
-    pending_deny_data_    = "deny_"    + req.id;
-    approval_result_      = 0;
+    // Register this request's pending approval result.  Each request gets
+    // its own entry keyed by req.id, so concurrent requests are independent
+    // and cannot overwrite each other's matching state.
+    {
+        std::lock_guard<std::mutex> lock(approval_mtx_);
+        pending_results_[req.id] = 0;
+    }
 
     // Send the approval notification with Approve/Deny buttons.
     if (!send_approval_message(token, req)) {
+        {
+            std::lock_guard<std::mutex> lock(approval_mtx_);
+            pending_results_.erase(req.id);
+        }
         reason = "Failed to send QQ approval notification";
         return false;
     }
 
-    // Block until the matching callback arrives or the timeout expires.
-    // wait_for temporarily releases the lock while waiting, allowing
-    // on_interaction_create to acquire it and set the result.
-    bool got_response = approval_cv_.wait_for(
-        lock, std::chrono::seconds(cfg.timeout_seconds),
-        [this] { return approval_result_ != 0 || !ws_connected_; });
+    // Block until this request's matching callback arrives or the timeout
+    // expires.  wait_for temporarily releases the lock while waiting,
+    // allowing on_interaction_create to resolve this request's entry.
+    bool got_response = false;
+    {
+        std::unique_lock<std::mutex> lock(approval_mtx_);
+        got_response = approval_cv_.wait_for(
+            lock, std::chrono::seconds(cfg.timeout_seconds),
+            [this, &req] {
+                auto it = pending_results_.find(req.id);
+                return (it != pending_results_.end() && it->second != 0) ||
+                       !ws_connected_;
+            });
+    }
 
     if (!ws_connected_) {
+        {
+            std::lock_guard<std::mutex> lock(approval_mtx_);
+            pending_results_.erase(req.id);
+        }
         reason = "QQ WebSocket disconnected while waiting for approval";
         return false;
     }
 
-    if (!got_response || approval_result_ == 0) {
+    int result = 0;
+    {
+        std::lock_guard<std::mutex> lock(approval_mtx_);
+        auto it = pending_results_.find(req.id);
+        if (it != pending_results_.end()) {
+            result = it->second;
+            pending_results_.erase(it);
+        }
+    }
+
+    if (!got_response || result == 0) {
         reason = "Approval timed out after " +
                  std::to_string(cfg.timeout_seconds) + " seconds";
         send_qq_message(token, "⏰ Timed out: " + req.id);
         return false;
     }
 
-    if (approval_result_ == 1) {
+    if (result == 1) {
         send_qq_message(token, "✅ Approved: " + req.id);
         return true;
     }
