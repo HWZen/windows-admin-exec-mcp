@@ -3,6 +3,8 @@
 MCP for Windows systems to execute instructions with administrator privileges.  
 适用于Windows系统的以管理员权限执行指令的 MCP。
 
+![AdminExecMCP Poster](./poster-v2.png)
+
 ---
 
 ## Architecture
