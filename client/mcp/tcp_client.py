@@ -77,8 +77,10 @@ def send_command(
     payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
 
     # The socket read timeout must be generous enough to cover the command
-    # execution timeout plus some overhead.
-    socket_timeout = float(timeout_seconds) + 30.0
+    # execution timeout plus some overhead.  A timeout_seconds of 0 means "no
+    # timeout", so the socket must block indefinitely (None) rather than being
+    # capped at 30 s (BUG-M3).
+    socket_timeout = float(timeout_seconds) + 30.0 if timeout_seconds > 0 else None
 
     try:
         with socket.create_connection((host, port), timeout=connect_timeout) as sock:
