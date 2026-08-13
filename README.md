@@ -214,12 +214,32 @@ for skill in module.SKILLS:
 
 ---
 
+## Configuration Reference
+
+Top-level `config.json` settings:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `port` | `12380` | TCP listen port. |
+| `bind_address` | `127.0.0.1` | Address to bind (loopback only by default). |
+| `listen_backlog` | `16` | `listen()` backlog (accept queue). |
+| `max_concurrent_clients` | `16` | Maximum simultaneous client threads; `0` = unlimited. |
+| `ssl_verify` | `true` | Verify TLS certificates for outbound Telegram/QQ HTTPS requests. |
+| `log_level` | `info` | `trace`/`debug`/`info`/`warn`/`error`/`critical`/`off`. |
+| `approval` | — | Approval-gate configuration (see below). |
+
 ## Security Considerations
 
 - The service binds **only to `127.0.0.1`** (localhost) by default; it is not
   accessible from the network.
 - Enable **Telegram or QQ bot approval** (`approval.enabled = true`) to require explicit
   human sign-off for every command the AI attempts to run.
+- TLS certificate verification for outbound HTTPS is **enabled by default**
+  (`ssl_verify = true`). Only disable it if you fully understand the
+  man-in-the-middle risk.
+- The log level defaults to `info` so command payloads are not written at
+  `debug`/`trace` level. Every executed command is still recorded in an
+  `AUDIT:` log line (command, exit code, duration) for accountability.
 - The service runs as `LocalSystem`. Commands it executes inherit this token and
   have full administrator access to the local machine.
 - Restrict who can connect to the MCP server in your AI host configuration.

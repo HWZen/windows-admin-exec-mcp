@@ -15,6 +15,7 @@ This repository has two main implementation surfaces and one test surface:
 - Read [service/src/protocol.h](service/src/protocol.h) before changing request or response payloads.
 - Read [client/mcp/main.py](client/mcp/main.py) and [client/mcp/tcp_client.py](client/mcp/tcp_client.py) before changing Python client behavior.
 - Read [tests/test_tcp_client.py](tests/test_tcp_client.py) before editing TCP framing or client error handling.
+- Read [ISSUES.md](ISSUES.md) for the known-issues list and current fix status before starting work.
 
 ## Working Rules
 
@@ -23,6 +24,7 @@ This repository has two main implementation surfaces and one test surface:
 - Keep the wire protocol aligned across C++ and Python. Any message shape or framing change requires checking both implementations and tests.
 - Keep Windows-specific behavior explicit. This project intentionally uses the Windows Service Control Manager, `cmd.exe /c`, Winsock, and administrator/SYSTEM execution.
 - Preserve the default security posture unless asked otherwise: loopback bind (`127.0.0.1`) and optional approval flow.
+- Maintain [ISSUES.md](ISSUES.md): check off issues you fix, append newly discovered problems, and correct outdated conclusions. Never leave a fixed issue unchecked.
 
 ## Build And Test
 
@@ -71,3 +73,4 @@ pip install -r client/mcp/requirements.txt
 
 - Link to existing project docs instead of copying them into new agent instructions.
 - If a task adds a new developer workflow or validation command, update [README.md](README.md) when that information is user-facing rather than expanding this file with long prose.
+- [ISSUES.md](ISSUES.md) is a living issue tracker, not a one-time report. Whenever you fix an issue, discover a new problem, or find a previous conclusion wrong, update it in the same change.

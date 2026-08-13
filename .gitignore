@@ -61,3 +61,6 @@ service/config.json
 # Local build scripts (machine-specific paths)
 service/build-rel.bat
 service/build-ninja.bat
+
+# WorkBuddy local project data (memories, task state — never commit)
+.workbuddy/
