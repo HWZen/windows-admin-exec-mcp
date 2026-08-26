@@ -101,6 +101,12 @@ private:
     std::thread receive_thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> ws_connected_{false};
+    // Set on normal loop exit so stop() can distinguish "thread finished"
+    // from "thread stuck inside a blocking WinHTTP call" (which made join()
+    // hang forever and left ghost processes holding the listen port,
+    // 2026-08-25).
+    std::atomic<bool> heartbeat_exited_{false};
+    std::atomic<bool> receive_exited_{false};
 
     // ---- Gateway protocol state ----
     uint32_t heartbeat_interval_ms_ = 45000;

@@ -18,8 +18,8 @@ void init_logger(const std::string& log_path, const std::string& level) {
     logger->set_level(lvl);
 
     logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
-    // Flush info and above immediately (keeps audit logs durable) without
-    // forcing a disk sync for every verbose debug/trace line.
-    logger->flush_on(spdlog::level::info);
+    // Flush everything immediately: this service logs very little, and
+    // buffered debug lines are worthless during incident diagnosis.
+    logger->flush_on(spdlog::level::debug);
     spdlog::set_default_logger(logger);
 }

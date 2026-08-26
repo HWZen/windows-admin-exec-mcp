@@ -37,9 +37,16 @@ private:
     std::atomic<bool> running_{false};
 
     // Owned via shared_ptr so client threads can hold a reference without risk
-    // of use-after-free during shutdown (BUG-H1).
-    std::shared_ptr<Approver> approver_;
+    // of use-after-free during shutdown (BUG-H1). Atomic so the background
+    // retry thread can install a late-started approver while clients connect.
+    std::atomic<std::shared_ptr<Approver>> approver_;
     std::shared_ptr<CommandExecutor> executor_;
+
+    // Retries create_approver() in the background until it succeeds or the
+    // server stops (BUG-M7: a transient network failure at service start —
+    // e.g. DNS not yet ready at boot — used to disable approval forever).
+    void approver_retry_loop();
+    std::thread approver_retry_thread_;
 
     // Current number of active client threads, used to enforce
     // max_concurrent_clients (ARCH-2).

@@ -170,17 +170,49 @@ void QQApprover::stop() {
     ws_connected_ = false;
 
     // Closing the WebSocket handle unblocks WinHttpWebSocketReceive in the
-    // receive thread.
+    // receive thread — unless that call is already wedged inside the kernel,
+    // in which case nothing unblocks it and an unconditional join() hangs the
+    // whole shutdown (ghost-process incident, 2026-08-25). So wait bounded:
+    // if a thread does not confirm exit in time, detach it and skip handle
+    // teardown; process exit reclaims everything.
     if (hWebSocket_) {
         WinHttpWebSocketShutdown(hWebSocket_,
                                  WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
                                  nullptr, 0);
     }
 
-    if (receive_thread_.joinable()) receive_thread_.join();
-    if (heartbeat_thread_.joinable()) heartbeat_thread_.join();
+    auto wait_exit = [](std::atomic<bool>& flag, int grace_ms) {
+        for (int waited = 0; waited < grace_ms; waited += 100) {
+            if (flag.load(std::memory_order_acquire)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return flag.load(std::memory_order_acquire);
+    };
 
-    disconnect_websocket();
+    bool recv_done = !receive_thread_.joinable() ||
+                     wait_exit(receive_exited_, 10000);
+    if (!recv_done) {
+        spdlog::error("QQ: receive thread stuck in WinHTTP — detaching it");
+        receive_thread_.detach();
+    } else if (receive_thread_.joinable()) {
+        receive_thread_.join();
+    }
+
+    bool hb_done = !heartbeat_thread_.joinable() ||
+                   wait_exit(heartbeat_exited_, 4000);
+    if (!hb_done) {
+        spdlog::error("QQ: heartbeat thread stuck — detaching it");
+        heartbeat_thread_.detach();
+    } else if (heartbeat_thread_.joinable()) {
+        heartbeat_thread_.join();
+    }
+
+    // Only close WinHTTP handles when no thread can still be using them.
+    if (recv_done && hb_done) {
+        disconnect_websocket();
+    } else {
+        spdlog::warn("QQ: skipping WebSocket teardown — threads detached");
+    }
 }
 
 // ===========================================================================
@@ -298,6 +330,10 @@ bool QQApprover::send_approval_message(const std::string& access_token,
     spdlog::debug("QQ: send approval body: {}", body_str);
     std::string resp = http_request(url, "POST", body_str,
                                     "QQBot " + access_token);
+    spdlog::info("QQ: approval POST to openid={} resp_bytes={} resp={}",
+                 openid.substr(0, 8) + "...",
+                 resp.size(),
+                 resp.empty() ? "<empty>" : resp.substr(0, 300));
     if (resp.empty()) {
         spdlog::error("QQ: send approval failed (empty response)");
         return false;
@@ -567,6 +603,7 @@ void QQApprover::heartbeat_loop() {
             break;
         }
     }
+    heartbeat_exited_.store(true, std::memory_order_release);
 }
 
 void QQApprover::receive_loop() {
@@ -641,6 +678,7 @@ void QQApprover::receive_loop() {
 
     ws_connected_ = false;
     approval_cv_.notify_all();
+    receive_exited_.store(true, std::memory_order_release);
 }
 
 // ===========================================================================
@@ -776,6 +814,8 @@ void QQApprover::on_interaction_create(const std::string& event_body) {
 
 bool QQApprover::request_approval(const CommandRequest& req,
                                   std::string& reason) {
+    spdlog::info("QQ: approval gate hit id={} command=\"{}\"",
+                 req.id, req.command.substr(0, 120));
     if (!ws_connected_) {
         reason = "QQ WebSocket gateway is not connected";
         return false;
@@ -846,6 +886,8 @@ bool QQApprover::request_approval(const CommandRequest& req,
     }
 
     if (!got_response || result == 0) {
+        spdlog::info("QQ: approval id={} timed out after {}s",
+                     req.id, cfg_.timeout_seconds);
         reason = "Approval timed out after " +
                  std::to_string(cfg_.timeout_seconds) + " seconds";
         send_qq_message(token, "⏰ Timed out: " + req.id);
@@ -853,10 +895,12 @@ bool QQApprover::request_approval(const CommandRequest& req,
     }
 
     if (result == 1) {
+        spdlog::info("QQ: approval id={} APPROVED via button", req.id);
         send_qq_message(token, "✅ Approved: " + req.id);
         return true;
     }
 
+    spdlog::info("QQ: approval id={} DENIED via button", req.id);
     reason = "Request denied via QQ";
     send_qq_message(token, "❌ Denied: " + req.id);
     return false;

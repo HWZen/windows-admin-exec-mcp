@@ -15,6 +15,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <chrono>
 #include <thread>
 #include <string>
 #include <stdexcept>
@@ -231,9 +232,13 @@ void TcpServer::run() {
         throw std::runtime_error("socket() failed");
     }
 
-    // Allow quick restart
+    // Exclusive bind (SEC/OPS): with SO_REUSEADDR a hung previous instance
+    // that has not released its listening socket lets this process bind the
+    // same port successfully, and new connections then land in an accept
+    // backlog nobody serves ("ghost" listener, observed 2026-08-25). Failing
+    // loudly here beats silently sharing the port.
     int opt = 1;
-    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR,
+    setsockopt(listen_sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
                reinterpret_cast<const char*>(&opt), sizeof(opt));
 
     sockaddr_in addr{};
@@ -257,6 +262,10 @@ void TcpServer::run() {
     }
 
     approver_ = create_approver(cfg_);
+    if (cfg_.approval.enabled && !approver_.load()) {
+        spdlog::warn("approval backend unavailable at startup — retrying in background");
+        approver_retry_thread_ = std::thread(&TcpServer::approver_retry_loop, this);
+    }
     executor_ = std::make_shared<CommandExecutor>();
 
     while (running_) {
@@ -295,7 +304,7 @@ void TcpServer::run() {
         auto done = std::make_shared<std::atomic<bool>>(false);
         // Copy the shared_ptrs into the worker so the approver/executor stay
         // alive for as long as any client thread is using them (BUG-H1).
-        auto approver = approver_;
+        auto approver = approver_.load();
         auto executor = executor_;
         std::thread t([client, this, approver, executor, done]() {
             handle_client(client, approver, executor);
@@ -316,13 +325,34 @@ void TcpServer::run() {
     // re-stop it here.
     closesocket(listen_sock);
 
+    if (approver_retry_thread_.joinable()) approver_retry_thread_.join();
+
     join_all_threads();
 
     // Final safety net: ensure no child process outlives the service.
     if (executor_) executor_->terminate_all();
 
-    approver_.reset();
+    approver_.store(nullptr);
     executor_.reset();
+}
+
+void TcpServer::approver_retry_loop() {
+    // Retry create_approver() every 15 s until it succeeds or the server
+    // stops.  Sleep in small slices so shutdown stays prompt.
+    while (running_) {
+        for (int i = 0; i < 30 && running_; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        if (!running_ || approver_.load()) return;
+
+        auto cand = create_approver(cfg_);
+        if (cand) {
+            spdlog::info("approval backend started after retry");
+            approver_.store(std::move(cand));
+            return;
+        }
+        spdlog::warn("approval backend retry failed — will try again");
+    }
 }
 
 void TcpServer::stop() {
@@ -330,7 +360,7 @@ void TcpServer::stop() {
     // Terminate in-flight child processes and stop the approval backend so any
     // blocked client threads (execution or approval wait) return promptly.
     if (executor_) executor_->terminate_all();
-    if (approver_) approver_->stop();
+    if (auto approver = approver_.load()) approver->stop();
 }
 
 void TcpServer::reap_finished_threads() {
@@ -347,8 +377,31 @@ void TcpServer::reap_finished_threads() {
 
 void TcpServer::join_all_threads() {
     std::lock_guard<std::mutex> lock(threads_mtx_);
+    // Bounded wait: a client thread can sit in an approval wait or command
+    // execution far longer than the SCM is willing to tolerate during stop.
+    // Waiting unconditionally produced processes that hung mid-shutdown while
+    // still holding the listening socket (ghost listener, 2026-08-25). After
+    // the grace period, detach whatever remains — the process exits right
+    // after and the OS reclaims their resources.
+    constexpr auto kGrace = std::chrono::seconds(15);
+    const auto deadline = std::chrono::steady_clock::now() + kGrace;
+
     for (auto& ct : client_threads_) {
-        if (ct.thread.joinable()) ct.thread.join();
+        auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining > std::chrono::milliseconds(0)) {
+            // Poll the done flag in small slices until this thread finishes
+            // or the global deadline passes.
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (ct.done->load(std::memory_order_acquire)) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+        if (!ct.done->load(std::memory_order_acquire)) {
+            spdlog::warn("client thread did not finish within shutdown grace — detaching");
+            if (ct.thread.joinable()) ct.thread.detach();
+        } else if (ct.thread.joinable()) {
+            ct.thread.join();
+        }
     }
     client_threads_.clear();
 }
