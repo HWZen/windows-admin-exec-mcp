@@ -115,7 +115,7 @@ class TestSendCommand:
             send_command("127.0.0.1", 1, "echo hi", connect_timeout=1.0)
 
     def test_request_contains_command(self):
-        """Verify the request sent to the service includes the command field."""
+        """Verify the request sent to the service includes the command fields."""
         received_request: list[dict] = []
 
         def serve(server):
@@ -141,12 +141,49 @@ class TestSendCommand:
         t = threading.Thread(target=serve, args=(srv,), daemon=True)
         t.start()
 
-        send_command("127.0.0.1", port, "ipconfig", working_dir="C:\\", timeout_seconds=30)
+        send_command(
+            "127.0.0.1", port, "ipconfig",
+            description="查看网络适配器配置",
+            working_dir="C:\\", timeout_seconds=30,
+        )
         t.join(timeout=5)
 
         assert len(received_request) == 1
         req = received_request[0]
         assert req["command"] == "ipconfig"
+        assert req["description"] == "查看网络适配器配置"
         assert req["working_dir"] == "C:\\"
         assert req["timeout_seconds"] == 30
         assert "id" in req
+
+    def test_request_description_defaults_to_empty(self):
+        """Omitting description sends an empty string (backward compatible)."""
+        received_request: list[dict] = []
+
+        def serve(server):
+            conn, _ = server.accept()
+            raw_len = _recv_exactly(conn, 4)
+            (length,) = struct.unpack(">I", raw_len)
+            body = _recv_exactly(conn, length)
+            received_request.append(json.loads(body))
+            mock = {
+                "id": "x", "success": True,
+                "stdout_output": "ok", "stderr_output": "",
+                "exit_code": 0, "error_message": "",
+            }
+            conn.sendall(_frame(mock))
+            conn.close()
+            server.close()
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        t = threading.Thread(target=serve, args=(srv,), daemon=True)
+        t.start()
+
+        send_command("127.0.0.1", port, "echo hi")
+        t.join(timeout=5)
+
+        assert received_request[0]["description"] == ""

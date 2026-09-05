@@ -238,8 +238,11 @@ bool TelegramApprover::request_approval(const CommandRequest& req,
   const std::string deny_data = "deny_" + req.id;
 
   std::ostringstream msg;
-  msg << "🔐 <b>AdminExecMCP — Approval Required</b>\n\n"
-      << "Command:\n<pre>" << html_escape(req.command) << "</pre>\n";
+  msg << "🔐 <b>AdminExecMCP — Approval Required</b>\n\n";
+  if (!req.description.empty()) {
+    msg << "Description:\n<i>" << html_escape(req.description) << "</i>\n\n";
+  }
+  msg << "Command:\n<pre>" << html_escape(req.command) << "</pre>\n";
   if (!req.working_dir.empty()) {
     msg << "Working dir: <code>" << html_escape(req.working_dir) << "</code>\n";
   }

@@ -291,8 +291,11 @@ bool QQApprover::send_approval_message(const std::string& access_token,
     std::string url = "https://api.bot.qq.com/v2/users/" + openid + "/messages";
 
     std::ostringstream md;
-    md << "## 🔐 AdminExecMCP — Approval Required\n\n"
-       << "**Command:** " << req.command << "\n\n";
+    md << "## 🔐 AdminExecMCP — Approval Required\n\n";
+    if (!req.description.empty()) {
+      md << "**Description:** " << req.description << "\n\n";
+    }
+    md << "**Command:** " << req.command << "\n\n";
     if (!req.working_dir.empty()) {
         md << "**Working dir:** " << req.working_dir << "\n\n";
     }

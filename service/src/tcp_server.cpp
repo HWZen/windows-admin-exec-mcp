@@ -72,6 +72,7 @@ bool parse_request(const std::string& raw, CommandRequest& req) {
         auto j = json::parse(raw);
         req.id             = j.value("id", "");
         req.command        = j.value("command", "");
+        req.description    = j.value("description", "");
         req.working_dir    = j.value("working_dir", "");
         req.timeout_seconds = j.value("timeout_seconds", 60u);
         return !req.id.empty() && !req.command.empty();

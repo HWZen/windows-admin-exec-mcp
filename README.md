@@ -51,10 +51,16 @@ All messages between the Python clients and the C++ service are framed as:
 {
   "id": "uuid4",
   "command": "ipconfig /all",
+  "description": "查看所有网络适配器的 IP 配置，用于排查网络问题",
   "working_dir": "",
   "timeout_seconds": 60
 }
 ```
+
+> `description` is the AI-provided human-readable explanation of what the
+> command does. It is displayed in approval messages so the human approver
+> does not have to decode the raw command line. Older clients that omit the
+> field remain compatible (empty description → the line is hidden).
 
 **Response** (service → client):
 ```json
@@ -142,6 +148,9 @@ When the AI calls `execute_command`, the service will send a Telegram message li
 
 ```
 🔐 AdminExecMCP — Approval Required
+
+Description:
+  查看所有网络适配器的 IP 配置，用于排查网络问题
 
 Command:
   ipconfig /all

@@ -45,6 +45,7 @@ def send_command(
     host: str,
     port: int,
     command: str,
+    description: str = "",
     working_dir: str = "",
     timeout_seconds: int = 60,
     connect_timeout: float = 5.0,
@@ -55,6 +56,8 @@ def send_command(
         host: Service hostname (default ``127.0.0.1``).
         port: Service TCP port (default ``12380``).
         command: Command line to execute.
+        description: Human-readable explanation of what the command does;
+                     shown to the human approver in approval messages.
         working_dir: Optional working directory.
         timeout_seconds: Command execution timeout in seconds.
         connect_timeout: Seconds to wait for the TCP connection.
@@ -71,6 +74,7 @@ def send_command(
     request = {
         "id": str(uuid.uuid4()),
         "command": command,
+        "description": description,
         "working_dir": working_dir,
         "timeout_seconds": timeout_seconds,
     }

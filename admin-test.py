@@ -18,6 +18,7 @@ def send_raw_command(
     host: str,
     port: int,
     command: str,
+    description: str = "",
     working_dir: str = "",
     timeout_seconds: int = 60,
     connect_timeout: float = 5.0,
@@ -25,6 +26,7 @@ def send_raw_command(
     request = {
         "id": str(uuid.uuid4()),
         "command": command,
+        "description": description,
         "working_dir": working_dir,
         "timeout_seconds": timeout_seconds,
     }

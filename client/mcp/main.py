@@ -33,7 +33,10 @@ mcp = FastMCP(
     instructions=(
         "This MCP server proxies commands to the AdminExecMCP Windows service, "
         "which executes them with full administrator (SYSTEM) privileges. "
-        "Use execute_command to run any Windows command or PowerShell script."
+        "Use execute_command to run any Windows command or PowerShell script. "
+        "Always provide a clear, human-readable 'description' explaining what "
+        "the command does and why it is needed — it is shown to the human "
+        "approver when approval mode is enabled."
     ),
 )
 
@@ -44,6 +47,7 @@ mcp = FastMCP(
 @mcp.tool()
 def execute_command(
     command: str,
+    description: str,
     working_dir: str = "",
     timeout_seconds: int = 60,
 ) -> str:
@@ -53,12 +57,18 @@ def execute_command(
     (administrator) permissions through the AdminExecMCP Windows service.
 
     If approval mode is enabled in the service's config.json, the request is
-    sent to the configured Telegram bot and waits for the owner to approve it
-    before execution.
+    sent to the configured Telegram/QQ bot and waits for the owner to approve
+    it before execution. The ``description`` is displayed to the human approver
+    together with the command line, so they can review the request without
+    having to decode the raw command themselves.
 
     Args:
         command: The command line to run, e.g. ``ipconfig /all`` or
                  ``powershell -Command Get-Service``.
+        description: Required. One or two plain sentences in the approver's
+                     language explaining what this command does and why it is
+                     being run, e.g. "查看所有网络适配器的 IP 配置，用于排查
+                     网络连通性问题". Do not just repeat the command line.
         working_dir: Working directory for the command (defaults to
                      ``%SystemRoot%\\System32``).
         timeout_seconds: Maximum time to wait for the command to complete
@@ -75,6 +85,7 @@ def execute_command(
             host=host,
             port=port,
             command=command,
+            description=description,
             working_dir=working_dir,
             timeout_seconds=timeout_seconds,
         )

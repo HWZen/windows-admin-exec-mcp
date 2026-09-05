@@ -45,6 +45,14 @@ class ExecuteCommandSkill:
                 "type": "string",
                 "description": "Command line to execute (passed to cmd.exe /c).",
             },
+            "description": {
+                "type": "string",
+                "description": (
+                    "Required. One or two plain sentences explaining what the "
+                    "command does and why it is needed. Shown to the human "
+                    "approver in approval messages."
+                ),
+            },
             "working_dir": {
                 "type": "string",
                 "description": "Working directory (optional).",
@@ -56,12 +64,13 @@ class ExecuteCommandSkill:
                 "default": 60,
             },
         },
-        "required": ["command"],
+        "required": ["command", "description"],
     }
 
     def __call__(
         self,
         command: str,
+        description: str = "",
         working_dir: str = "",
         timeout_seconds: int = 60,
         **_kwargs: Any,
@@ -75,6 +84,7 @@ class ExecuteCommandSkill:
                 host=host,
                 port=port,
                 command=command,
+                description=description,
                 working_dir=working_dir,
                 timeout_seconds=timeout_seconds,
             )
